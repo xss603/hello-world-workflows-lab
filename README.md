@@ -27,7 +27,9 @@ hello-world-workflows-lab/
 ```bash
 kind create cluster --name argo-lab
 kubectl create namespace argo
-kubectl apply -n argo -f https://github.com/argoproj/argo-workflows/releases/latest/download/quick-start-minimal.yaml
+# --server-side avoids "annotations: Too long" errors client-side apply hits
+# on the Workflow/WorkflowTemplate CRDs — see docs/argo-workflows-concepts.md
+kubectl apply -n argo --server-side -f https://github.com/argoproj/argo-workflows/releases/latest/download/quick-start-minimal.yaml
 kubectl -n argo wait --for=condition=available --timeout=300s deploy --all
 kubectl -n argo port-forward svc/argo-server 2746:2746 &
 export ARGO_SECURE=false
@@ -36,7 +38,10 @@ export ARGO_SECURE=false
 The `quick-start-minimal.yaml` manifest installs the workflow-controller, the
 argo-server, and an in-cluster MinIO instance pre-wired as the default
 artifact repository — everything `hello-artifacts` needs, with no extra
-configuration.
+configuration. `workflows/hello-resource` additionally needs its own RBAC
+applied first: `kubectl -n argo apply -f workflows/hello-resource/rbac.yaml`
+(see the submit command in the table below and
+[docs/argo-workflows-concepts.md](docs/argo-workflows-concepts.md) for why).
 
 ## Workflows
 

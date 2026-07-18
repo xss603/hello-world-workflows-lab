@@ -4,6 +4,13 @@
 # permissions for whatever object kind/verb the template uses. The default
 # install's `default` ServiceAccount has no such rights, so this creates a
 # scoped one just for this workflow's ConfigMap create/get/patch/delete.
+#
+# It also needs the quick-start install's built-in `executor` Role bound to
+# it: every pod's wait-container calls back to the API server to report node
+# results via the WorkflowTaskResult CRD, regardless of what the main
+# container's template type is. Skipping this binding doesn't block the
+# ConfigMap create/patch itself, but the pod still fails - "workflowtaskresults.argoproj.io
+# is forbidden" - because the executor sidecar can't report status back.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -28,4 +35,16 @@ subjects:
 roleRef:
   kind: Role
   name: hello-resource-configmap-editor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hello-resource-executor
+subjects:
+  - kind: ServiceAccount
+    name: hello-resource-sa
+roleRef:
+  kind: Role
+  name: executor
   apiGroup: rbac.authorization.k8s.io
