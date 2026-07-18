@@ -1,0 +1,76 @@
+# hello-artifacts: a file produced by one step is uploaded to the in-cluster
+# artifact repository (the MinIO instance Argo's quick-start install ships)
+# and downloaded again as an input artifact in the next step. This exercises
+# the real artifact repository, not just parameter passing.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-artifacts-
+  labels:
+    lab.example.com/concept: artifacts
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      steps:
+        - - name: generate
+            template: generate-artifact
+        - - name: consume
+            template: consume-artifact
+            arguments:
+              artifacts:
+                - name: message
+                  from: "{{steps.generate.outputs.artifacts.message}}"
+
+    - name: generate-artifact
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args:
+          - |
+            mkdir -p /tmp/out
+            echo "hello, this text traveled through the MinIO artifact repository" > /tmp/out/message.txt
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      outputs:
+        artifacts:
+          - name: message
+            path: /tmp/out/message.txt
+
+    - name: consume-artifact
+      inputs:
+        artifacts:
+          - name: message
+            path: /tmp/in/message.txt
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo 'contents received via artifact repository:'; cat /tmp/in/message.txt"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

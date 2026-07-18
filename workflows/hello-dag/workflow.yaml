@@ -1,0 +1,71 @@
+# hello-dag: same shape of work as hello-steps, but expressed as a DAG with
+# explicit `dependencies:` — a fan-out from one task into two parallel tasks,
+# then a fan-in into a final task that depends on both.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-dag-
+  labels:
+    lab.example.com/concept: dag-template
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: start
+            template: echo
+            arguments:
+              parameters:
+                - name: message
+                  value: "start"
+          - name: fan-out-a
+            template: echo
+            dependencies: [start]
+            arguments:
+              parameters:
+                - name: message
+                  value: "branch-a"
+          - name: fan-out-b
+            template: echo
+            dependencies: [start]
+            arguments:
+              parameters:
+                - name: message
+                  value: "branch-b"
+          - name: fan-in
+            template: echo
+            dependencies: [fan-out-a, fan-out-b]
+            arguments:
+              parameters:
+                - name: message
+                  value: "fan-in: both branches complete"
+
+    - name: echo
+      inputs:
+        parameters:
+          - name: message
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"$MESSAGE\""]
+        env:
+          - name: MESSAGE
+            value: "{{inputs.parameters.message}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

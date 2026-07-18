@@ -1,0 +1,31 @@
+# RBAC for hello-resource. Resource templates talk to the Kubernetes API
+# directly using the *workflow's* ServiceAccount (not the argo-server or
+# workflow-controller service accounts) - so that identity needs its own
+# permissions for whatever object kind/verb the template uses. The default
+# install's `default` ServiceAccount has no such rights, so this creates a
+# scoped one just for this workflow's ConfigMap create/get/patch/delete.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hello-resource-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hello-resource-configmap-editor
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hello-resource-configmap-editor
+subjects:
+  - kind: ServiceAccount
+    name: hello-resource-sa
+roleRef:
+  kind: Role
+  name: hello-resource-configmap-editor
+  apiGroup: rbac.authorization.k8s.io

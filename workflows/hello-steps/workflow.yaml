@@ -1,0 +1,74 @@
+# hello-steps: a Steps template running two stages sequentially, passing an
+# output parameter from the first step as an input to the second.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-steps-
+  labels:
+    lab.example.com/concept: steps-template
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      steps:
+        - - name: generate-greeting
+            template: generate
+        - - name: print-greeting
+            template: print
+            arguments:
+              parameters:
+                - name: message
+                  value: "{{steps.generate-greeting.outputs.parameters.greeting}}"
+
+    - name: generate
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo 'hello from step one' | tee /tmp/greeting.txt"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      outputs:
+        parameters:
+          - name: greeting
+            valueFrom:
+              path: /tmp/greeting.txt
+
+    - name: print
+      inputs:
+        parameters:
+          - name: message
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"step two received: $MESSAGE\""]
+        env:
+          - name: MESSAGE
+            value: "{{inputs.parameters.message}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

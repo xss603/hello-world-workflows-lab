@@ -1,0 +1,59 @@
+# hello-resource: a Resource template talks to the Kubernetes API directly -
+# no container runs the kubectl-equivalent for you, Argo does it in-process.
+# Here it creates a ConfigMap, then a second task patches it. Requires the
+# RBAC in rbac.yaml (apply that first: `kubectl apply -f rbac.yaml`).
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-resource-
+  labels:
+    lab.example.com/concept: resource-template
+spec:
+  entrypoint: main
+  serviceAccountName: hello-resource-sa
+  templates:
+    - name: main
+      steps:
+        - - name: create-configmap
+            template: create-configmap
+        - - name: patch-configmap
+            template: patch-configmap
+            arguments:
+              parameters:
+                - name: configmap-name
+                  value: "{{steps.create-configmap.outputs.parameters.name}}"
+
+    - name: create-configmap
+      resource:
+        action: create
+        setOwnerReference: true
+        manifest: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            generateName: hello-resource-demo-
+            labels:
+              lab.example.com/concept: resource-template
+          data:
+            created-by: hello-resource-workflow
+            stage: "created"
+      outputs:
+        parameters:
+          - name: name
+            valueFrom:
+              jsonPath: '{.metadata.name}'
+
+    - name: patch-configmap
+      inputs:
+        parameters:
+          - name: configmap-name
+      resource:
+        action: patch
+        mergeStrategy: merge
+        manifest: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "{{inputs.parameters.configmap-name}}"
+          data:
+            stage: "patched"

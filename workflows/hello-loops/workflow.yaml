@@ -1,0 +1,83 @@
+# hello-loops: withItems runs a fixed, inline list of inputs through the same
+# template in parallel. withParam does the same but sources the list at
+# runtime from a prior step's JSON output — both are demonstrated here.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-loops-
+  labels:
+    lab.example.com/concept: loops
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      steps:
+        - - name: with-items
+            template: print-item
+            arguments:
+              parameters:
+                - name: item
+                  value: "{{item}}"
+            withItems:
+              - alpha
+              - beta
+              - gamma
+        - - name: generate-list
+            template: generate-json-list
+        - - name: with-param
+            template: print-item
+            arguments:
+              parameters:
+                - name: item
+                  value: "{{item}}"
+            withParam: "{{steps.generate-list.outputs.result}}"
+
+    - name: print-item
+      inputs:
+        parameters:
+          - name: item
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"processing item: $ITEM\""]
+        env:
+          - name: ITEM
+            value: "{{inputs.parameters.item}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+    - name: generate-json-list
+      script:
+        image: python:3.12-alpine
+        command: [python]
+        source: |
+          import json
+          print(json.dumps(["delta", "epsilon", "zeta"]))
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

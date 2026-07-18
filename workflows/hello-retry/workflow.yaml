@@ -1,0 +1,49 @@
+# hello-retry: retryStrategy re-runs a failing step up to `limit` times.
+# The script uses Argo's built-in {{retries}} variable (the current attempt
+# number, 0-indexed) to fail on attempts 0 and 1 and succeed on attempt 2 -
+# so you can watch it actually fail-then-recover instead of just reading it.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-retry-
+  labels:
+    lab.example.com/concept: retry-strategy
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      activeDeadlineSeconds: 120
+      retryStrategy:
+        limit: "4"
+        retryPolicy: OnFailure
+        backoff:
+          duration: "5s"
+          factor: "2"
+          maxDuration: "1m"
+      script:
+        image: busybox:1.36
+        command: [sh]
+        source: |
+          echo "this is attempt {{retries}}"
+          if [ "{{retries}}" -lt "2" ]; then
+            echo "simulating a transient failure"
+            exit 1
+          fi
+          echo "succeeded on attempt {{retries}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

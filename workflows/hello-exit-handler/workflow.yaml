@@ -1,0 +1,60 @@
+# hello-exit-handler: spec.onExit points at a template that always runs once
+# the workflow finishes, regardless of whether the main entrypoint succeeded
+# or failed. The main step succeeds here (so the workflow as a whole reaches
+# Succeeded); the exit handler still fires and reports {{workflow.status}}.
+# Flip the `exit 0` below to `exit 1` locally to watch the same handler fire
+# on the Failed path instead.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-exit-handler-
+  labels:
+    lab.example.com/concept: exit-handler
+spec:
+  entrypoint: main
+  onExit: exit-handler
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo 'doing the real work'; exit 0"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+    - name: exit-handler
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"workflow finished with status: $WORKFLOW_STATUS\""]
+        env:
+          - name: WORKFLOW_STATUS
+            value: "{{workflow.status}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

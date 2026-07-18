@@ -1,0 +1,37 @@
+# A ClusterWorkflowTemplate is the cluster-scoped equivalent of a
+# WorkflowTemplate: not bound to one namespace, so any Workflow in any
+# namespace can invoke it (permissions allowing). See README.md in this
+# directory for when to reach for this over a namespaced WorkflowTemplate.
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterWorkflowTemplate
+metadata:
+  name: cluster-greeter
+  labels:
+    lab.example.com/concept: cluster-workflow-template
+spec:
+  templates:
+    - name: greet
+      inputs:
+        parameters:
+          - name: name
+            value: "world"
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"hello, $NAME, from a cluster-scoped ClusterWorkflowTemplate\""]
+        env:
+          - name: NAME
+            value: "{{inputs.parameters.name}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

@@ -1,0 +1,37 @@
+# hello-script: a Script template. Argo writes `source` to a file inside the
+# container and executes it with the given `command` interpreter - handy for
+# inline logic that would be awkward to cram into `args`.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-script-
+  labels:
+    lab.example.com/concept: script-template
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      script:
+        image: python:3.12-alpine
+        command: [python]
+        source: |
+          import platform
+          print("hello from a python script template")
+          print(f"running on Python {platform.python_version()}")
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

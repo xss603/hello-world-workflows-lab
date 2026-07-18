@@ -1,0 +1,36 @@
+# A WorkflowTemplate is a namespace-scoped, reusable set of templates.
+# It isn't run directly - a Workflow (or another WorkflowTemplate/
+# CronWorkflow) invokes one of its templates via `templateRef`.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: greeter
+  labels:
+    lab.example.com/concept: workflow-template
+spec:
+  templates:
+    - name: greet
+      inputs:
+        parameters:
+          - name: name
+            value: "world"
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"hello, $NAME, from a shared WorkflowTemplate\""]
+        env:
+          - name: NAME
+            value: "{{inputs.parameters.name}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

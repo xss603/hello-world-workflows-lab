@@ -1,0 +1,36 @@
+# hello-cron: a CronWorkflow is a thin wrapper that submits a Workflow on a
+# schedule (standard cron syntax, controller's timezone unless `timezone` is
+# set). This one reuses the `greet` template from the `greeter`
+# WorkflowTemplate (../../templates/workflow-template/template.yaml) rather
+# than redefining the work inline.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: hello-cron
+  labels:
+    lab.example.com/concept: cron-workflow
+spec:
+  schedules:
+    - "*/5 * * * *"
+  timezone: "UTC"
+  concurrencyPolicy: "Replace"
+  startingDeadlineSeconds: 30
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  workflowSpec:
+    entrypoint: main
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      fsGroup: 1000
+    templates:
+      - name: main
+        steps:
+          - - name: greet
+              templateRef:
+                name: greeter
+                template: greet
+              arguments:
+                parameters:
+                  - name: name
+                    value: "scheduled run"

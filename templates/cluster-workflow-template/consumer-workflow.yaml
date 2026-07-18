@@ -1,0 +1,27 @@
+# Invokes the `greet` template from the cluster-scoped `cluster-greeter`
+# ClusterWorkflowTemplate. Note clusterScope: true - without it Argo looks
+# for a namespaced WorkflowTemplate with this name and the reference fails.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-cluster-workflow-template-
+  labels:
+    lab.example.com/concept: cluster-workflow-template-consumer
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      steps:
+        - - name: greet
+            templateRef:
+              name: cluster-greeter
+              template: greet
+              clusterScope: true
+            arguments:
+              parameters:
+                - name: name
+                  value: "hello-world-workflows-lab"

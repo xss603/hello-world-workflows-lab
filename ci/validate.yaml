@@ -1,0 +1,34 @@
+name: Validate Argo manifests
+
+on:
+  pull_request:
+    paths:
+      - "workflows/**"
+      - "templates/**"
+      - "cron/**"
+  push:
+    branches: [main]
+    paths:
+      - "workflows/**"
+      - "templates/**"
+      - "cron/**"
+
+jobs:
+  argo-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install argo CLI
+        run: |
+          curl -sLO https://github.com/argoproj/argo-workflows/releases/latest/download/argo-linux-amd64.gz
+          gunzip argo-linux-amd64.gz
+          chmod +x argo-linux-amd64
+          sudo mv argo-linux-amd64 /usr/local/bin/argo
+
+      # --offline validates manifests against the bundled JSON schema without
+      # needing a live cluster - fast and enough to catch structural mistakes
+      # (bad field names, missing required fields, malformed templateRefs).
+      - name: argo lint (workflows + templates + cron)
+        run: |
+          argo lint workflows/ templates/ cron/ --offline

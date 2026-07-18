@@ -1,0 +1,79 @@
+# hello-conditional: a `when:` expression on a step decides, at runtime,
+# whether it runs at all — based on the output of a prior step. One branch
+# runs, the other is deliberately skipped, so both outcomes are visible in
+# the UI/CLI status (Succeeded vs Skipped).
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-conditional-
+  labels:
+    lab.example.com/concept: conditional
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      steps:
+        - - name: decide
+            template: decide
+        - - name: heads-branch
+            template: echo
+            arguments:
+              parameters:
+                - name: message
+                  value: "heads branch ran"
+            when: "{{steps.decide.outputs.result}} == heads"
+          - name: tails-branch
+            template: echo
+            arguments:
+              parameters:
+                - name: message
+                  value: "tails branch ran"
+            when: "{{steps.decide.outputs.result}} == tails"
+
+    - name: decide
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo -n heads"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+
+    - name: echo
+      inputs:
+        parameters:
+          - name: message
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo \"$MESSAGE\""]
+        env:
+          - name: MESSAGE
+            value: "{{inputs.parameters.message}}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi

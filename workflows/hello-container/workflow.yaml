@@ -1,0 +1,33 @@
+# hello-container: the simplest possible Argo Workflow.
+# One Pod template, one container, no steps/DAG orchestration on top.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-container-
+  labels:
+    lab.example.com/concept: container-template
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      container:
+        image: busybox:1.36
+        command: [sh, -c]
+        args: ["echo 'hello from a plain container template'"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
