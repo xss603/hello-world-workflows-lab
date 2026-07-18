@@ -262,6 +262,55 @@ scheduled tick (`hello-cron-<timestamp>`) fire and succeed on its own — then
 suspended (`argo cron suspend hello-cron`) so it doesn't keep submitting
 workflows every 5 minutes in the background afterward.
 
+## A real-world example: nightly Postgres backups ([`db-backup-postgres`](../cron/db-backup-postgres/cronworkflow.yaml))
+
+Everything above is a minimal, single-concept demo. This one composes several
+of them into something closer to what you'd actually run in production: a
+nightly `CronWorkflow` that `pg_dump`s a real Postgres instance
+([`postgres.yaml`](../cron/db-backup-postgres/postgres.yaml) deploys one,
+seeded with a `widgets` table via `/docker-entrypoint-initdb.d`) and uploads
+the dump as an artifact.
+
+A few choices here are deliberately different from the earlier examples, and
+worth calling out because they're the kind of thing that actually matters for
+a backup job specifically:
+
+- **`pg_dump --format=custom` instead of piping through `gzip`.** Postgres's
+  custom format is already compressed and — unlike a raw SQL dump — restorable
+  selectively (`pg_restore --list` / `pg_restore -t widgets`) without piping
+  the whole file through `psql` again. One less moving part than shelling out
+  to `gzip` separately, and closer to what you'd actually script for a real
+  database.
+- **A dedicated `verify` step, not just a non-zero exit code.** `pg_dump`
+  exiting 0 tells you the connection worked and it wrote *something*; it
+  doesn't tell you the file is a valid, restorable archive. `verify` reruns
+  `pg_restore --list` against the artifact — parsing the archive's own table
+  of contents — so a truncated or corrupted dump fails the workflow instead
+  of silently becoming "the backup" for the day. Confirmed for real: the
+  logs from the first run show `pg_restore --list` printing the actual TOC —
+  `TABLE public widgets`, `TABLE DATA public widgets`, the sequence and
+  primary key — not a stub.
+- **`concurrencyPolicy: Forbid`, not `Replace`** (unlike `hello-cron`). If a
+  backup is still dumping when the next scheduled tick arrives, you want the
+  new run skipped, not the in-flight dump killed partway through.
+- **`retryStrategy` on `dump` is a real retry, not the artificial-failure
+  trick from the Retries section above (`hello-retry`).** A couple of quick
+  retries with backoff covers a transient connection blip
+  to the database without masking a persistent problem (`limit: "2"` still
+  fails the workflow if Postgres is actually down).
+
+Nothing new broke getting this one green — the `workflowtaskresults` RBAC
+requirement and the `--server-side` apply gotcha from earlier sections apply
+here too (this CronWorkflow uses the default ServiceAccount, which already
+has the `executor` Role bound cluster-wide by the quick-start install, so no
+extra RBAC file was needed this time — that requirement only bites
+`resource:` templates with a *custom* ServiceAccount, like `hello-resource`).
+Verified by triggering an immediate run (`argo submit --from
+cronworkflow/db-backup-postgres --wait`), confirming `Succeeded`, and
+checking the artifact actually landed in MinIO
+(`kubectl -n argo exec deploy/minio -- ls /data/my-bucket/<run-name>/`)
+before suspending the schedule the same way as `hello-cron`.
+
 ## One more thing that isn't a "gotcha" so much as a trap for the unwary: retention
 
 The quick-start `workflow-controller-configmap` ships with:

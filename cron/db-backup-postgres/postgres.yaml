@@ -1,0 +1,101 @@
+# A throwaway PostgreSQL instance for db-backup-postgres to actually back up.
+# In a real cluster this would be a managed database or a StatefulSet with a
+# real PersistentVolumeClaim; an emptyDir + single Deployment replica is
+# enough for a lab whose point is the backup Workflow, not HA Postgres.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-backup-postgres-credentials
+type: Opaque
+stringData:
+  POSTGRES_USER: labuser
+  POSTGRES_PASSWORD: lab-password-change-me
+  POSTGRES_DB: labdb
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-backup-postgres-initdb
+data:
+  init.sql: |
+    CREATE TABLE widgets (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    INSERT INTO widgets (name) VALUES ('sprocket'), ('gizmo'), ('doohickey');
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    lab.example.com/concept: db-backup-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: db-backup-postgres
+  template:
+    metadata:
+      labels:
+        app: db-backup-postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: db-backup-postgres-credentials
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "labuser", "-d", "labdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: initdb
+          configMap:
+            name: db-backup-postgres-initdb
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    lab.example.com/concept: db-backup-postgres
+spec:
+  selector:
+    app: db-backup-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

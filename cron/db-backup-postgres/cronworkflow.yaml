@@ -1,0 +1,121 @@
+# db-backup-postgres: a nightly pg_dump of the `postgres` Service defined in
+# postgres.yaml, uploaded as an output artifact to the MinIO artifact
+# repository (same pattern as workflows/hello-artifacts), then verified by a
+# second step that inspects the dump's table of contents rather than trusting
+# a zero exit code alone.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: db-backup-postgres
+  labels:
+    lab.example.com/concept: db-backup
+spec:
+  schedules:
+    - "0 2 * * *"
+  timezone: "UTC"
+  # Forbid, not Replace: an overlapping backup run should be skipped, not
+  # cancel an in-flight dump partway through.
+  concurrencyPolicy: "Forbid"
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  workflowSpec:
+    entrypoint: main
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      fsGroup: 999
+    templates:
+      - name: main
+        steps:
+          - - name: dump
+              template: dump
+          - - name: verify
+              template: verify
+              arguments:
+                artifacts:
+                  - name: backup
+                    from: "{{steps.dump.outputs.artifacts.backup}}"
+
+      - name: dump
+        activeDeadlineSeconds: 180
+        retryStrategy:
+          limit: "2"
+          retryPolicy: OnFailure
+          backoff:
+            duration: "10s"
+            factor: "2"
+            maxDuration: "1m"
+        container:
+          image: postgres:16-alpine
+          command: [sh, -c]
+          args:
+            - |
+              set -eu
+              mkdir -p /tmp/backup
+              pg_dump --format=custom --file=/tmp/backup/dump.pgcustom
+              echo "dump written: $(du -h /tmp/backup/dump.pgcustom | cut -f1)"
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: db-backup-postgres-credentials
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-backup-postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: db-backup-postgres-credentials
+                  key: POSTGRES_DB
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+        outputs:
+          artifacts:
+            - name: backup
+              path: /tmp/backup/dump.pgcustom
+
+      - name: verify
+        inputs:
+          artifacts:
+            - name: backup
+              path: /tmp/backup/dump.pgcustom
+        container:
+          image: postgres:16-alpine
+          command: [sh, -c]
+          args:
+            - |
+              set -eu
+              echo "dump size: $(du -h /tmp/backup/dump.pgcustom | cut -f1)"
+              pg_restore --list /tmp/backup/dump.pgcustom
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi

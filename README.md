@@ -64,6 +64,7 @@ pointed at the `argo` namespace.
 | [`templates/workflow-template`](templates/workflow-template/template.yaml) | Reusable `WorkflowTemplate` invoked via `templateRef` | `kubectl apply -f templates/workflow-template/template.yaml && argo submit --watch templates/workflow-template/consumer-workflow.yaml` |
 | [`templates/cluster-workflow-template`](templates/cluster-workflow-template/template.yaml) | Cluster-scoped `ClusterWorkflowTemplate` (see its [README](templates/cluster-workflow-template/README.md) for when to pick this over a `WorkflowTemplate`) | `kubectl apply -f templates/cluster-workflow-template/template.yaml && argo submit --watch templates/cluster-workflow-template/consumer-workflow.yaml` |
 | [`cron/hello-cron`](cron/hello-cron/cronworkflow.yaml) | `CronWorkflow` on a schedule, reusing the `greeter` `WorkflowTemplate` | `kubectl apply -f templates/workflow-template/template.yaml && kubectl apply -f cron/hello-cron/cronworkflow.yaml` (then `argo cron list` / wait for the schedule, or `argo submit --from cronworkflow/hello-cron --watch` to trigger one run immediately) |
+| [`cron/db-backup-postgres`](cron/db-backup-postgres/cronworkflow.yaml) | Real-world example: nightly `pg_dump` of a Postgres `Deployment`, uploaded as an artifact and verified with `pg_restore --list` | `kubectl -n argo apply -f cron/db-backup-postgres/postgres.yaml && kubectl -n argo apply -f cron/db-backup-postgres/cronworkflow.yaml` (then `argo submit --from cronworkflow/db-backup-postgres --watch` to trigger one run immediately) |
 
 ## CI
 
