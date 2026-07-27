@@ -1,6 +1,7 @@
-# Two least-privilege ServiceAccounts, one per step, each bound to a Vault
+# Least-privilege ServiceAccounts, one per step (plus a third for the
+# beginner workflow's Postgres step - see below), each bound to a Vault
 # Kubernetes-auth role that only grants read on the one secret path that
-# step needs (see vault-setup.md). Both also need the quick-start install's
+# step needs (see vault-setup.md). All also need the quick-start install's
 # built-in `executor` Role - same reason as workflows/hello-resource/rbac.yaml:
 # every pod's executor reports its result via the WorkflowTaskResult CRD
 # regardless of what the main container does, and a custom ServiceAccount
@@ -16,6 +17,20 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: export-csv-cos-upload-sa
+  labels:
+    lab.example.com/concept: export-csv-to-cos
+---
+# Used only by workflow-beginner.yaml's export-one-query step, bound to a
+# *different* Vault role/policy than export-csv-cos-pg-sa above - it can
+# read database/creds/export-csv-cos-pg-role (Vault's Database Secrets
+# Engine, a fresh auto-expiring Postgres credential per run) but has no
+# access to secret/data/db/postgres (the static KV credential workflow.yaml
+# uses). Deliberately separate identities so switching one workflow to
+# dynamic secrets can't accidentally affect the other's access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: export-csv-cos-pg-dynamic-sa
   labels:
     lab.example.com/concept: export-csv-to-cos
 ---
@@ -38,6 +53,18 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: export-csv-cos-upload-sa
+roleRef:
+  kind: Role
+  name: executor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: export-csv-cos-pg-dynamic-executor
+subjects:
+  - kind: ServiceAccount
+    name: export-csv-cos-pg-dynamic-sa
 roleRef:
   kind: Role
   name: executor

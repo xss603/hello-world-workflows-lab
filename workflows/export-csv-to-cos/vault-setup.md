@@ -121,6 +121,115 @@ and endpoint (e.g. `https://s3.us-south.cloud-object-storage.appdomain.cloud`)
 — nothing else about the workflow changes, since `mc` and the injector
 templates don't know or care that MinIO is standing in for COS here.
 
+## 6. Dynamic Postgres credentials for `workflow-beginner.yaml` (Database Secrets Engine)
+
+Everything above is Vault's **KV v2** engine: a fixed value (`export_csv_reader`'s
+username/password) written once, read many times, unchanged until someone
+overwrites it. `workflow.yaml` still uses exactly that. `workflow-beginner.yaml`'s
+`export-one-query` step instead uses Vault's **Database Secrets Engine**,
+which doesn't store a credential at all — it connects to Postgres itself
+and *creates a brand-new, expiring role* every time something asks it for
+one.
+
+```bash
+kubectl -n vault exec vault-0 -- sh -c '
+  export VAULT_TOKEN=root
+
+  vault secrets enable database
+
+  # Vault needs its own admin-capable connection to Postgres to run the
+  # CREATE ROLE / GRANT / DROP ROLE statements below on demand. Reusing
+  # labuser (already a superuser here, see above) rather than provisioning
+  # a separate Vault-admin Postgres role: fine for this lab as long as you
+  # never run `vault write -f database/rotate-root/postgres-lab` against
+  # it - that would let Vault take over managing labusers own password,
+  # silently breaking db-backup-postgres, which still needs to know it.
+  # A real deployment would give Vault a dedicated admin identity instead
+  # of sharing one with an application that has its own static credential.
+  vault write database/config/postgres-lab \
+    plugin_name=postgresql-database-plugin \
+    connection_url="postgresql://{{username}}:{{password}}@postgres.argo.svc.cluster.local:5432/labdb?sslmode=disable" \
+    allowed_roles="export-csv-cos-pg-role" \
+    username="labuser" \
+    password="lab-password-change-me"
+
+  # creation_statements runs once, at the moment something reads
+  # database/creds/export-csv-cos-pg-role - {{name}}, {{password}} and
+  # {{expiration}} are filled in by Vault itself. revocation_statements
+  # runs once the lease ends, dropping the role Vault just created.
+  vault write database/roles/export-csv-cos-pg-role \
+    db_name=postgres-lab \
+    creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '"'"'{{password}}'"'"' VALID UNTIL '"'"'{{expiration}}'"'"'; GRANT USAGE ON SCHEMA public TO \"{{name}}\"; GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" \
+    revocation_statements="REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM \"{{name}}\"; REVOKE ALL PRIVILEGES ON SCHEMA public FROM \"{{name}}\"; DROP ROLE IF EXISTS \"{{name}}\";" \
+    default_ttl="5m" \
+    max_ttl="15m"
+
+  vault policy write export-csv-cos-pg-dynamic - <<EOF
+path "database/creds/export-csv-cos-pg-role" {
+  capabilities = ["read"]
+}
+EOF
+
+  vault write auth/kubernetes/role/export-csv-cos-pg-dynamic \
+    bound_service_account_names=export-csv-cos-pg-dynamic-sa \
+    bound_service_account_namespaces=argo \
+    policies=export-csv-cos-pg-dynamic \
+    ttl=15m
+'
+```
+
+`export-one-query` runs under `export-csv-cos-pg-dynamic-sa` (created by
+`rbac.yaml`, deliberately a *different* ServiceAccount than
+`export-csv-cos-pg-sa`) — it can read `database/creds/export-csv-cos-pg-role`
+and nothing else; it has no path to `secret/data/db/postgres` at all, so
+switching this one workflow to dynamic secrets can't accidentally weaken or
+change `workflow.yaml`'s access.
+
+The database engine's response shape is different from KV v2's, which shows
+up directly in the injector template. KV v2 nests the actual secret under
+`.Data.data` (the outer `.Data` is Vault's response envelope, the inner
+`data` is the KV v2 format itself); the database engine has no such second
+layer - just `.Data.username` and `.Data.password`:
+
+```yaml
+vault.hashicorp.com/agent-inject-template-db-creds.sh: |
+  {{- with secret "database/creds/export-csv-cos-pg-role" -}}
+  export PGHOST="postgres"
+  export PGPORT="5432"
+  export PGDATABASE="labdb"
+  export PGUSER="{{ .Data.username }}"
+  export PGPASSWORD="{{ .Data.password }}"
+  {{- end -}}
+```
+
+`PGHOST`/`PGPORT`/`PGDATABASE` are hardcoded here, not templated from Vault -
+they're static connection details, not part of what the database engine
+generates per lease. Only the credential itself (username, password) is
+dynamic.
+
+Verified, not just configured, at every stage of the lifecycle:
+- `vault read database/creds/export-csv-cos-pg-role` (run manually, once,
+  before touching the workflow) returned a `username`/`password` for a role
+  that didn't exist a second earlier - confirmed by connecting with those
+  exact credentials: `SELECT` succeeds, `INSERT` fails with `permission
+  denied for table widgets`, same boundary as the static `export_csv_reader`
+  role.
+- `vault lease revoke <lease_id>` on that manually-read credential actually
+  dropped the role - `\du` on its username afterward returned nothing.
+- Submitting the real workflow (4 parallel `export-one-query` pods via
+  `withItems`) produced **4 distinct** roles in Postgres at once
+  (`v-kubernet-export-c-...`, each with its own `Password valid until`
+  timestamp) and **4 distinct** entries under
+  `vault list sys/leases/lookup/database/creds/export-csv-cos-pg-role` -
+  one per pod, not one shared credential reused four times.
+- What's confirmed is manual revocation (`vault lease revoke`) actually
+  running `revocation_statements` and dropping the role; automatic
+  revocation once `default_ttl` elapses with nobody calling anything is
+  standard Vault expiration-manager behavior but wasn't independently
+  watched happen unprompted in this session - if you want to see it
+  yourself: `vault list sys/leases/lookup/database/creds/export-csv-cos-pg-role`
+  right after a run, then again 5+ minutes later.
+
 ## The `{{ }}` collision that didn't happen
 
 Argo Workflows and Vault Agent Injector both use `{{ }}` — Argo for its own

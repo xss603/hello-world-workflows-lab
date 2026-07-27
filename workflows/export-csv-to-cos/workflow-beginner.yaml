@@ -15,11 +15,18 @@
 # instead of 2 - fine for a handful of reports, worth revisiting
 # workflow.yaml's approach if that list grows into the dozens.
 #
-# Prerequisites are identical to workflow.yaml: the `postgres`
+# Prerequisites are otherwise identical to workflow.yaml: the `postgres`
 # Deployment/Service from ../../cron/db-backup-postgres/postgres.yaml, and
-# the Vault setup in vault-setup.md. Same rbac.yaml, same Vault roles/
-# policies/secrets - nothing about credentials or RBAC changes here, only
-# how the query list is consumed.
+# the Vault setup in vault-setup.md.
+#
+# Credentials ARE different, though, and deliberately so: `export-one-query`
+# uses Vault's Database Secrets Engine (database/creds/export-csv-cos-pg-role,
+# via a separate ServiceAccount/Vault role - export-csv-cos-pg-dynamic-sa,
+# not export-csv-cos-pg-sa) instead of workflow.yaml's static KV secret.
+# Every one of the 4 parallel pods below gets its own Postgres role, created
+# by Vault the moment that pod asks for it and dropped again once its lease
+# expires - confirmed directly (4 distinct roles in Postgres from one run,
+# not 1 reused 4 times) rather than assumed. See vault-setup.md section 6.
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
@@ -67,7 +74,11 @@ spec:
             template: upload-cos
 
     - name: export-one-query
-      serviceAccountName: export-csv-cos-pg-sa
+      # Different ServiceAccount than workflow.yaml's export step on
+      # purpose - see rbac.yaml. This one can only read
+      # database/creds/export-csv-cos-pg-role, not the static
+      # secret/data/db/postgres path.
+      serviceAccountName: export-csv-cos-pg-dynamic-sa
       metadata:
         annotations:
           vault.hashicorp.com/agent-inject: "true"
@@ -75,15 +86,23 @@ spec:
           # without this, the injector also adds a long-running sidecar that
           # never terminates, and the pod hangs forever waiting for it.
           vault.hashicorp.com/agent-pre-populate-only: "true"
-          vault.hashicorp.com/role: "export-csv-cos-pg"
-          vault.hashicorp.com/agent-inject-secret-db-creds.sh: "secret/data/db/postgres"
+          vault.hashicorp.com/role: "export-csv-cos-pg-dynamic"
+          # database/creds/<role> (Vault's Database Secrets Engine), not
+          # secret/data/db/postgres (the static KV path workflow.yaml
+          # uses). Every pod that starts calls this path fresh and gets
+          # back a Postgres role Vault just created that didn't exist a
+          # moment ago - username and password included, both different
+          # every single run - which Vault auto-revokes (drops the role)
+          # after the lease's default_ttl. See vault-setup.md for how the
+          # role, and the creation/revocation SQL it runs, are defined.
+          vault.hashicorp.com/agent-inject-secret-db-creds.sh: "database/creds/export-csv-cos-pg-role"
           vault.hashicorp.com/agent-inject-template-db-creds.sh: |
-            {{- with secret "secret/data/db/postgres" -}}
-            export PGHOST="{{ .Data.data.host }}"
-            export PGPORT="{{ .Data.data.port }}"
-            export PGUSER="{{ .Data.data.username }}"
-            export PGPASSWORD="{{ .Data.data.password }}"
-            export PGDATABASE="{{ .Data.data.database }}"
+            {{- with secret "database/creds/export-csv-cos-pg-role" -}}
+            export PGHOST="postgres"
+            export PGPORT="5432"
+            export PGDATABASE="labdb"
+            export PGUSER="{{ .Data.username }}"
+            export PGPASSWORD="{{ .Data.password }}"
             {{- end -}}
       inputs:
         parameters:

@@ -582,6 +582,54 @@ this holds on a multi-node cluster or a different storage backend, though —
 concurrent RWO access across pods is provisioner-specific behavior, not a
 Kubernetes guarantee.
 
+### Static secret vs. dynamic secret, same Vault Agent Injector annotations
+
+`workflow.yaml` and `workflow-beginner.yaml` fetch their Postgres
+credentials from two different *kinds* of Vault secret, which is worth
+being explicit about since the annotations look almost identical either
+way. `workflow.yaml` reads `secret/data/db/postgres` - Vault's **KV v2**
+engine, a fixed username/password someone wrote once
+(`vault kv put ...`) that sits there, unchanged, until it's manually
+rotated. `workflow-beginner.yaml`'s `export-one-query` step instead reads
+`database/creds/export-csv-cos-pg-role` - Vault's **Database Secrets
+Engine**, which holds no credential at all. Every time that path is read,
+Vault connects to Postgres itself and runs a `CREATE ROLE` it generates on
+the spot; when the lease ends, Vault runs a matching `DROP ROLE` — the
+role never outlives the lease that created it. Full setup in
+[vault-setup.md](../workflows/export-csv-to-cos/vault-setup.md), section 6.
+
+Two things that mattered in practice, not just in theory:
+
+- **The two engines' secret shapes are different, and the injector
+  template has to match.** KV v2 nests the real payload under
+  `.Data.data` (`.Data.data.username`); the database engine's response has
+  no such nesting (`.Data.username`) — copy-pasting one template shape onto
+  the other path fails, not because Vault rejects it, but because the
+  fields you're referencing don't exist at that depth.
+- **Verified the actual dynamic behavior, not just that the workflow ran.**
+  A single `Succeeded` status doesn't prove credentials were really
+  per-request. What does: `vault list
+  sys/leases/lookup/database/creds/export-csv-cos-pg-role` right after a
+  run showed **4 distinct lease IDs** for the 4 `withItems`-fanned-out
+  pods, and `\du` on Postgres showed **4 distinct roles**
+  (`v-kubernet-export-c-...`), each with its own `Password valid until`
+  timestamp - not the same role reused four times. Revoking one lease
+  manually (`vault lease revoke <id>`) dropped exactly that role;
+  `INSERT`/`DROP TABLE` against a live dynamic credential fail the same
+  way they do against the static `export_csv_reader` role, confirming the
+  read-only boundary carried over.
+- **Vault's own connection to Postgres reuses `labuser`.** Vault needs an
+  admin-capable Postgres identity to run `CREATE ROLE`/`GRANT`/`DROP ROLE`
+  on demand, and `labuser` already qualifies (it's the bootstrap superuser
+  - see the read-only-role section above). This is a real, called-out
+  trade-off, not an oversight: it works precisely because nothing in this
+  lab ever calls `vault write -f database/rotate-root/postgres-lab`,
+  which would let Vault silently change `labuser`'s actual password and
+  break `db-backup-postgres` (which still authenticates with the static
+  password from a Kubernetes Secret). A production setup would give Vault
+  a dedicated admin identity instead of sharing one with an application
+  that holds its own long-lived credential elsewhere.
+
 ## One more thing that isn't a "gotcha" so much as a trap for the unwary: retention
 
 The quick-start `workflow-controller-configmap` ships with:
