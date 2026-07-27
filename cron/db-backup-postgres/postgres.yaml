@@ -1,7 +1,20 @@
-# A throwaway PostgreSQL instance for db-backup-postgres to actually back up.
-# In a real cluster this would be a managed database or a StatefulSet with a
-# real PersistentVolumeClaim; an emptyDir + single Deployment replica is
-# enough for a lab whose point is the backup Workflow, not HA Postgres.
+# A throwaway PostgreSQL instance for db-backup-postgres to actually back up
+# (and that workflows/export-csv-to-cos exports from - same instance, not a
+# separate one). In a real cluster this would be a managed database or a
+# StatefulSet with a real PersistentVolumeClaim; an emptyDir + single
+# Deployment replica is enough for a lab whose point is the Workflows, not
+# HA Postgres.
+#
+# IMPORTANT if you edit init.sql or zz-create-reader-role.sh: scripts in
+# docker-entrypoint-initdb.d only run once, against a brand-new empty data
+# directory. Applying an updated ConfigMap here does NOT re-run them against
+# the already-initialized `data` emptyDir - you have to force a fresh init:
+#   kubectl -n argo apply -f postgres.yaml
+#   kubectl -n argo delete pod -l app=db-backup-postgres
+#   kubectl -n argo rollout status deploy/postgres
+# Deleting the pod is safe: `data` is an emptyDir tied to the pod, so a new
+# pod gets a genuinely empty volume and re-runs every init script - but it
+# also means this really does erase and reseed everything, every time.
 apiVersion: v1
 kind: Secret
 metadata:

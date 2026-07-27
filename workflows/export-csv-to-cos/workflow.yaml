@@ -6,11 +6,16 @@
 # the in-cluster MinIO instead, since mc's commands are byte-for-byte
 # identical against either).
 #
+# Prerequisites, both one-time: the `postgres` Deployment/Service from
+# ../../cron/db-backup-postgres/postgres.yaml (this workflow doesn't
+# deploy its own Postgres - it's the same instance db-backup-postgres
+# backs up), and the Vault setup in vault-setup.md (auth method, policies,
+# roles, seeded secrets - including the `export_csv_reader` read-only
+# Postgres role postgres.yaml's init script creates).
+#
 # Both steps get their credentials from Vault via the Agent Injector - no
 # credentials are ever written into this manifest or into a Kubernetes
-# Secret the workflow itself owns. See vault-setup.md for the one-time
-# Vault configuration (auth method, policies, roles, seeded secrets) this
-# depends on.
+# Secret the workflow itself owns.
 #
 # The two steps share one Postgres-to-CSV-to-COS pipeline over a single
 # workflow-scoped PersistentVolumeClaim (`work`, declared in

@@ -23,6 +23,9 @@ hello-world-workflows-lab/
 - [kind](https://kind.sigs.k8s.io/)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Argo Workflows CLI](https://github.com/argoproj/argo-workflows/releases) (`argo`)
+- [Helm](https://helm.sh/) — only needed for `workflows/export-csv-to-cos`, to
+  install Vault + the Agent Injector; see
+  [vault-setup.md](workflows/export-csv-to-cos/vault-setup.md)
 
 ```bash
 kind create cluster --name argo-lab
@@ -65,7 +68,7 @@ pointed at the `argo` namespace.
 | [`templates/cluster-workflow-template`](templates/cluster-workflow-template/template.yaml) | Cluster-scoped `ClusterWorkflowTemplate` (see its [README](templates/cluster-workflow-template/README.md) for when to pick this over a `WorkflowTemplate`) | `kubectl apply -f templates/cluster-workflow-template/template.yaml && argo submit --watch templates/cluster-workflow-template/consumer-workflow.yaml` |
 | [`cron/hello-cron`](cron/hello-cron/cronworkflow.yaml) | `CronWorkflow` on a schedule, reusing the `greeter` `WorkflowTemplate` | `kubectl apply -f templates/workflow-template/template.yaml && kubectl apply -f cron/hello-cron/cronworkflow.yaml` (then `argo cron list` / wait for the schedule, or `argo submit --from cronworkflow/hello-cron --watch` to trigger one run immediately) |
 | [`cron/db-backup-postgres`](cron/db-backup-postgres/cronworkflow.yaml) | Real-world example: nightly `pg_dump` of a Postgres `Deployment`, uploaded as an artifact and verified with `pg_restore --list` | `kubectl -n argo apply -f cron/db-backup-postgres/postgres.yaml && kubectl -n argo apply -f cron/db-backup-postgres/cronworkflow.yaml` (then `argo submit --from cronworkflow/db-backup-postgres --watch` to trigger one run immediately) |
-| [`workflows/export-csv-to-cos`](workflows/export-csv-to-cos/workflow.yaml) | Real-world example: runs a defined list of named SELECT queries (full-table, filtered, join+aggregate) as CSV over a `volumeClaimTemplates` PVC shared between two steps, uploads to an S3-compatible bucket with `mc`; both steps get credentials from Vault via the Agent Injector (see [vault-setup.md](workflows/export-csv-to-cos/vault-setup.md)) | `kubectl -n argo apply -f workflows/export-csv-to-cos/rbac.yaml && argo submit --watch workflows/export-csv-to-cos/workflow.yaml` (requires the one-time Vault setup in vault-setup.md first) |
+| [`workflows/export-csv-to-cos`](workflows/export-csv-to-cos/workflow.yaml) | Real-world example: runs a defined list of named SELECT queries (full-table, filtered, join+aggregate) as CSV over a `volumeClaimTemplates` PVC shared between two steps, uploads to an S3-compatible bucket with `mc`; both steps get credentials from Vault via the Agent Injector (see [vault-setup.md](workflows/export-csv-to-cos/vault-setup.md)) | Needs the **same Postgres instance as `db-backup-postgres`** deployed first (`kubectl -n argo apply -f cron/db-backup-postgres/postgres.yaml`), plus the one-time Vault setup in vault-setup.md, then `kubectl -n argo apply -f workflows/export-csv-to-cos/rbac.yaml && argo submit --watch workflows/export-csv-to-cos/workflow.yaml` |
 
 ## CI
 
