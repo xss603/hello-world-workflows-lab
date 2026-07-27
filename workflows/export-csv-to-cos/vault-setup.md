@@ -222,13 +222,15 @@ Verified, not just configured, at every stage of the lifecycle:
   timestamp) and **4 distinct** entries under
   `vault list sys/leases/lookup/database/creds/export-csv-cos-pg-role` -
   one per pod, not one shared credential reused four times.
-- What's confirmed is manual revocation (`vault lease revoke`) actually
-  running `revocation_statements` and dropping the role; automatic
-  revocation once `default_ttl` elapses with nobody calling anything is
-  standard Vault expiration-manager behavior but wasn't independently
-  watched happen unprompted in this session - if you want to see it
-  yourself: `vault list sys/leases/lookup/database/creds/export-csv-cos-pg-role`
-  right after a run, then again 5+ minutes later.
+- Unattended auto-revocation once `default_ttl` elapses - the actual point
+  of using this engine over a static secret - was watched happen, not
+  assumed: same 4 roles from the run above, checked again 5+ minutes later
+  with nobody in between calling `vault lease revoke` or anything else.
+  `\du` on Postgres showed only `labuser` and `export_csv_reader` (the
+  workflow.yaml-facing static role) - all 4 dynamic
+  `v-kubernet-export-c-...` roles gone. `vault list
+  sys/leases/lookup/database/creds/export-csv-cos-pg-role` returned
+  `No value found` - zero active leases, zero credentials left to leak.
 
 ## The `{{ }}` collision that didn't happen
 

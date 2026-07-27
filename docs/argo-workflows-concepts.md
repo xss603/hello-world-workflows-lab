@@ -617,7 +617,12 @@ Two things that mattered in practice, not just in theory:
   manually (`vault lease revoke <id>`) dropped exactly that role;
   `INSERT`/`DROP TABLE` against a live dynamic credential fail the same
   way they do against the static `export_csv_reader` role, confirming the
-  read-only boundary carried over.
+  read-only boundary carried over. Watched the actual point of this engine
+  happen, too, not just configured it and hoped: those same 4 roles,
+  checked again 5+ minutes later with nobody calling `vault lease revoke`
+  in between - gone. `\du` showed only `labuser` and `export_csv_reader`
+  left; the lease lookup returned `No value found`. Nothing had to
+  remember to clean them up.
 - **Vault's own connection to Postgres reuses `labuser`.** Vault needs an
   admin-capable Postgres identity to run `CREATE ROLE`/`GRANT`/`DROP ROLE`
   on demand, and `labuser` already qualifies (it's the bootstrap superuser
