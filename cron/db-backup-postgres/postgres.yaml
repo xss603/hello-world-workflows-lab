@@ -11,6 +11,11 @@ stringData:
   POSTGRES_USER: labuser
   POSTGRES_PASSWORD: lab-password-change-me
   POSTGRES_DB: labdb
+  # Bootstrap password for the read-only role created below. Kept in this
+  # Secret (not hardcoded into the init script) so it's sourced the same
+  # way POSTGRES_PASSWORD already is - via envFrom on the postgres
+  # container - rather than sitting in plaintext inside a ConfigMap.
+  EXPORT_READER_PASSWORD: export-reader-password-change-me
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -47,6 +52,21 @@ data:
       (1, 1, 3),
       (1, 2, 1),
       (2, 3, 5);
+  # docker-entrypoint-initdb.d runs files in (lexically sorted) filename
+  # order, and this one has to run after init.sql: `GRANT ... ON ALL
+  # TABLES` only covers tables that already exist at the moment it runs.
+  # `.sh` (not `.sql`) so it's sourced directly by the entrypoint and can
+  # see $EXPORT_READER_PASSWORD from the container's own environment,
+  # instead of the password having to be written into this ConfigMap.
+  zz-create-reader-role.sh: |
+    #!/bin/sh
+    set -eu
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+      CREATE ROLE export_csv_reader WITH LOGIN PASSWORD '$EXPORT_READER_PASSWORD';
+      GRANT USAGE ON SCHEMA public TO export_csv_reader;
+      GRANT SELECT ON ALL TABLES IN SCHEMA public TO export_csv_reader;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO export_csv_reader;
+    EOSQL
 ---
 apiVersion: apps/v1
 kind: Deployment

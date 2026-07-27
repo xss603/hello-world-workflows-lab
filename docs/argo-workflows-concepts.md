@@ -462,10 +462,36 @@ parameter** — it comes from whoever submits this workflow (an operator, a
 CI pipeline), not from an untrusted end user. `name` still gets the same
 identifier-only validation as the old `tables` list, since it becomes part
 of a file path; `sql` doesn't get equivalent validation because there's no
-sane way to allowlist "some SELECT statement" without a real SQL parser. If
-you're ever tempted to let `queries` be influenced by something outside
-your own pipeline, put a read-only Postgres role behind it rather than
-trusting `sql` at face value.
+sane way to allowlist "some SELECT statement" without a real SQL parser.
+
+Trusting `sql`'s *shape* doesn't mean trusting the connection with more
+power than it needs, though. `export-csv` originally ran as `labuser` —
+which turns out to be a Postgres **superuser**: the official Postgres image
+grants the bootstrap `POSTGRES_USER` superuser by default, confirmed with
+`\du labuser` rather than assumed. A step that only ever runs `SELECT` had
+no reason to hold `Superuser, Create role, Create DB, Replication, Bypass
+RLS`. Fixed by adding a dedicated role — `zz-create-reader-role.sh` in
+[`db-backup-postgres/postgres.yaml`](../cron/db-backup-postgres/postgres.yaml)
+creates `export_csv_reader` with exactly `SELECT` on the schema (plus
+`ALTER DEFAULT PRIVILEGES` so it also covers tables added later), and
+`secret/db/postgres` in Vault now hands out that role's credentials
+instead of `labuser`'s. Proven, not just configured: connecting as
+`export_csv_reader` and running `SELECT` works; `INSERT` fails with
+`permission denied for table widgets`; `DROP TABLE` fails with `must be
+owner of table widgets`. The password itself still isn't hardcoded into the
+ConfigMap's SQL — it's read from `$EXPORT_READER_PASSWORD`, sourced via
+`envFrom` on the `postgres` container the same way `POSTGRES_PASSWORD`
+already is, since `docker-entrypoint-initdb.d` sources `.sh` files (with
+the container's environment available) rather than piping them into `psql`
+the way it does for `.sql` files.
+
+Small efficiency note in the same neighborhood: the original loop opened a
+fresh `psql` connection per query (5 connections for 4 queries — 1 to
+unpack `$QUERIES`, 1 per `\copy`). At 4 queries that's noise; at 50 it
+wouldn't be. It now builds one script — one `\copy (...) TO '/work/csv/
+<name>.csv' WITH CSV HEADER` line per query — and runs the whole thing
+through a single `psql` invocation, so query count no longer means
+connection count.
 
 Getting a JSON array from one workflow parameter into a per-query shell
 loop hit two real gotchas along the way, both worth knowing before you

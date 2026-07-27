@@ -89,12 +89,26 @@ in this lab needs — see docs/argo-workflows-concepts.md).
 
 ## 5. Seed the secrets
 
+`secret/db/postgres` intentionally holds credentials for `export_csv_reader`,
+**not** `labuser`. `labuser` is the Postgres bootstrap user and is a
+superuser by default (`\du labuser` will show `Superuser, Create role,
+Create DB, Replication, Bypass RLS`) — confirmed the hard way, not assumed.
+`export-csv` only ever runs `SELECT`, and `queries` is a workflow parameter
+containing arbitrary SQL, so there's no reason for that pod to hold
+superuser credentials merely because it's convenient. `export_csv_reader` is
+created by `cron/db-backup-postgres/postgres.yaml`'s
+`zz-create-reader-role.sh` init script with exactly `SELECT` on the schema
+(plus `ALTER DEFAULT PRIVILEGES` so it also covers tables added later) —
+verified directly: connecting as `export_csv_reader` and running `SELECT`
+works, `INSERT`/`DROP TABLE` both fail with `permission denied` /
+`must be owner of table`.
+
 ```bash
 kubectl -n vault exec vault-0 -- sh -c '
   export VAULT_TOKEN=root
   vault kv put secret/db/postgres \
     host=postgres port=5432 \
-    username=labuser password=lab-password-change-me database=labdb
+    username=export_csv_reader password=export-reader-password-change-me database=labdb
 
   vault kv put secret/cos/ibm \
     endpoint=http://minio.argo.svc.cluster.local:9000 \

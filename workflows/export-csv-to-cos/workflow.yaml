@@ -120,6 +120,13 @@ spec:
             | psql -X -v ON_ERROR_STOP=1 -At -F "$TAB" -v queries_json="$QUERIES" \
             > /tmp/queries.tsv
 
+          # Build every \copy as one line in a single script instead of
+          # opening a fresh psql connection per query - fine either way at
+          # 4 queries, but a real difference at scale (each psql invocation
+          # is its own TCP + auth handshake). \copy writes straight to a
+          # file path here instead of STDOUT + shell redirection, since
+          # they're all sharing one psql process now.
+          : > /tmp/copy-commands.sql
           while IFS="$TAB" read -r name sql; do
             case "$name" in
               *[!a-zA-Z0-9_]*)
@@ -127,14 +134,17 @@ spec:
                 exit 1
                 ;;
             esac
-            echo "running query '$name': $sql"
-            psql -X -v ON_ERROR_STOP=1 \
-              -c "\copy (${sql}) TO STDOUT WITH CSV HEADER" \
-              > "/work/csv/${name}.csv"
-            echo "  -> $(( $(wc -l < "/work/csv/${name}.csv") - 1 )) data row(s)"
+            printf "\\\\copy (%s) TO '/work/csv/%s.csv' WITH CSV HEADER\n" "$sql" "$name" >> /tmp/copy-commands.sql
           done < /tmp/queries.tsv
 
+          echo "running $(wc -l < /tmp/copy-commands.sql) quer(y/ies) in one psql session:"
+          cat /tmp/copy-commands.sql
+          psql -X -v ON_ERROR_STOP=1 < /tmp/copy-commands.sql
+
           echo "export complete:"
+          for f in /work/csv/*.csv; do
+            echo "  $f -> $(( $(wc -l < "$f") - 1 )) data row(s)"
+          done
           ls -la /work/csv
         volumeMounts:
           - name: work
