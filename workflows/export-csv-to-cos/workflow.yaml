@@ -1,7 +1,10 @@
-# export-csv-to-cos: exports a defined list of Postgres tables as CSV and
-# uploads them to an S3-compatible bucket (IBM Cloud Object Storage in
-# production; this lab points `mc` at the in-cluster MinIO instead, since
-# mc's commands are byte-for-byte identical against either).
+# export-csv-to-cos: runs a defined list of *named* SELECT queries against
+# Postgres - not just plain `SELECT * FROM table`, but whatever shape of
+# query the report actually needs (filtered, sorted, joined across tables,
+# aggregated) - one CSV per query, then uploads them to an S3-compatible
+# bucket (IBM Cloud Object Storage in production; this lab points `mc` at
+# the in-cluster MinIO instead, since mc's commands are byte-for-byte
+# identical against either).
 #
 # Both steps get their credentials from Vault via the Agent Injector - no
 # credentials are ever written into this manifest or into a Kubernetes
@@ -28,10 +31,22 @@ spec:
     fsGroup: 1000
   arguments:
     parameters:
-      # A defined, static list of tables - space-separated so a POSIX `sh`
-      # `for` loop can consume it with no extra tooling (no bash, no jq).
-      - name: tables
-        value: "widgets customers orders"
+      # A defined, static list of {name, sql} pairs, one CSV per entry.
+      # `name` becomes the output filename and must be a plain identifier
+      # (validated below); `sql` is a full SELECT and is trusted content -
+      # it comes from whoever submits this workflow, the same trust level
+      # as any other workflow parameter, not from an untrusted end user.
+      # Four different query shapes on purpose: a plain full-table select,
+      # a filtered+sorted select, and two join+aggregate queries pairing
+      # orders against each of the other two tables.
+      - name: queries
+        value: |
+          [
+            {"name": "widgets_all", "sql": "SELECT * FROM widgets ORDER BY id"},
+            {"name": "orders_last_7_days", "sql": "SELECT * FROM orders WHERE ordered_at > now() - interval '7 days' ORDER BY ordered_at DESC"},
+            {"name": "customer_order_totals", "sql": "SELECT c.name AS customer, SUM(o.quantity) AS total_quantity FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.name ORDER BY total_quantity DESC"},
+            {"name": "widget_popularity", "sql": "SELECT w.name AS widget, COUNT(*) AS times_ordered, SUM(o.quantity) AS total_units FROM orders o JOIN widgets w ON w.id = o.widget_id GROUP BY w.name ORDER BY total_units DESC"}
+          ]
 
   volumeClaimTemplates:
     - metadata:
@@ -49,8 +64,8 @@ spec:
             template: export-csv
             arguments:
               parameters:
-                - name: tables
-                  value: "{{workflow.parameters.tables}}"
+                - name: queries
+                  value: "{{workflow.parameters.queries}}"
         - - name: upload-cos
             template: upload-cos
 
@@ -75,26 +90,50 @@ spec:
             {{- end -}}
       inputs:
         parameters:
-          - name: tables
+          - name: queries
       script:
         image: postgres:16-alpine
         command: [sh]
+        env:
+          # Passed as an env var, not interpolated straight into the script
+          # source - Kubernetes hands env values to the container verbatim,
+          # so the JSON's own quotes/braces never get a second pass through
+          # anything that treats them as YAML or shell syntax.
+          - name: QUERIES
+            value: "{{inputs.parameters.queries}}"
         source: |
           set -eu
           . /vault/secrets/db-creds.sh
           mkdir -p /work/csv
-          for t in {{inputs.parameters.tables}}; do
-            case "$t" in
+
+          # No jq, no apk install (would need root - this pod runs as a
+          # fixed non-root UID). Postgres already has a JSON parser and
+          # psql is already here, so let the server unpack $QUERIES:
+          # `:'queries_json'` is psql's own bind-style substitution, which
+          # SQL-quotes the value correctly (embedded quotes, backslashes,
+          # newlines) without any hand-rolled escaping on our part. That
+          # substitution only happens for SQL psql reads as a script/from
+          # stdin, not for a `-c "..."` argument - piping it in via printf
+          # instead of using -c is what makes :'queries_json' work at all.
+          TAB=$(printf '\t')
+          printf "%s\n" "SELECT elem->>'name', elem->>'sql' FROM jsonb_array_elements(:'queries_json'::jsonb) AS elem;" \
+            | psql -X -v ON_ERROR_STOP=1 -At -F "$TAB" -v queries_json="$QUERIES" \
+            > /tmp/queries.tsv
+
+          while IFS="$TAB" read -r name sql; do
+            case "$name" in
               *[!a-zA-Z0-9_]*)
-                echo "refusing to export invalid table name: $t" >&2
+                echo "refusing to use invalid output name: $name" >&2
                 exit 1
                 ;;
             esac
-            echo "exporting table: $t"
+            echo "running query '$name': $sql"
             psql -X -v ON_ERROR_STOP=1 \
-              -c "\copy (SELECT * FROM ${t}) TO STDOUT WITH CSV HEADER" \
-              > "/work/csv/${t}.csv"
-          done
+              -c "\copy (${sql}) TO STDOUT WITH CSV HEADER" \
+              > "/work/csv/${name}.csv"
+            echo "  -> $(( $(wc -l < "/work/csv/${name}.csv") - 1 )) data row(s)"
+          done < /tmp/queries.tsv
+
           echo "export complete:"
           ls -la /work/csv
         volumeMounts:

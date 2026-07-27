@@ -433,6 +433,67 @@ custom ServiceAccounts still needed the `executor` Role bound via
 `rbac.yaml`, or the pods fail on `workflowtaskresults.argoproj.io is
 forbidden` regardless of whether Vault injection itself works correctly.
 
+### Different query shapes, not just `SELECT * FROM table`
+
+The first version of `export-csv` took a flat list of table names and ran
+`SELECT * FROM ${table}` for each. Real exports are rarely that uniform —
+some outputs are the whole table, some are filtered/sorted, some are joins
+with an aggregation. `queries` is now a JSON array of `{name, sql}` pairs,
+one arbitrary `SELECT` per entry, `name` becoming the output filename:
+
+```json
+[
+  {"name": "widgets_all", "sql": "SELECT * FROM widgets ORDER BY id"},
+  {"name": "orders_last_7_days", "sql": "SELECT * FROM orders WHERE ordered_at > now() - interval '7 days' ORDER BY ordered_at DESC"},
+  {"name": "customer_order_totals", "sql": "SELECT c.name AS customer, SUM(o.quantity) AS total_quantity FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.name ORDER BY total_quantity DESC"},
+  {"name": "widget_popularity", "sql": "SELECT w.name AS widget, COUNT(*) AS times_ordered, SUM(o.quantity) AS total_units FROM orders o JOIN widgets w ON w.id = o.widget_id GROUP BY w.name ORDER BY total_units DESC"}
+]
+```
+
+Verified for real, not just "it lints": all four ran, each producing a
+correctly-sized CSV, and the two aggregation queries were checked against
+the seed data by hand — `customer_order_totals` correctly sums Ada
+Lovelace's two orders (3 + 1 = 4) and Grace Hopper's one order (5), and
+`widget_popularity` correctly attributes quantities per widget across the
+`orders`/`widgets` join.
+
+**`sql` is trusted content, the same trust level as any other workflow
+parameter** — it comes from whoever submits this workflow (an operator, a
+CI pipeline), not from an untrusted end user. `name` still gets the same
+identifier-only validation as the old `tables` list, since it becomes part
+of a file path; `sql` doesn't get equivalent validation because there's no
+sane way to allowlist "some SELECT statement" without a real SQL parser. If
+you're ever tempted to let `queries` be influenced by something outside
+your own pipeline, put a read-only Postgres role behind it rather than
+trusting `sql` at face value.
+
+Getting a JSON array from one workflow parameter into a per-query shell
+loop hit two real gotchas along the way, both worth knowing before you
+reach for either of these patterns elsewhere:
+
+1. **`apk add jq` needs root — this pod runs as a fixed non-root UID.**
+   The first draft installed `jq` at container start to parse `$QUERIES`.
+   It failed immediately: `ERROR: Unable to open log: Permission denied` —
+   `apk` needs to write to `/etc/apk`, `/lib/apk/db`, `/var/cache/apk`,
+   none of which a non-root UID with no matching passwd entry can touch,
+   and this lab's `spec.securityContext.runAsNonRoot: true` (a convention
+   applied to every workflow here, not specific to this one) means that's
+   exactly the UID every step runs as. Baking `jq` into a custom image
+   would sidestep this; the fix used instead avoids needing `jq` at all —
+   **Postgres already has a JSON parser and `psql` is already required.**
+   `jsonb_array_elements(:'queries_json'::jsonb)` unpacks the array
+   server-side; the shell loop just reads back two plain columns.
+2. **`psql -v var=... -c "... :'var' ..."` silently doesn't substitute
+   `:'var'`.** Variable interpolation (`:name`, `:'name'`, `:"name"`) is a
+   feature of psql's script/interactive front-end, not of `-c`'s command
+   string — confirmed directly (`ERROR: syntax error at or near ":"`, the
+   token passed straight through to the server unresolved) rather than
+   assumed from memory. Piping the same SQL into psql's stdin instead of
+   passing it via `-c` was the fix — same query, same `-v` flag, the only
+   change is `printf '%s\n' "..." | psql ...` instead of `psql -c "..."`.
+   If a `:'var'`-style reference silently fails to resolve elsewhere, check
+   whether it's inside a `-c` argument first.
+
 ## One more thing that isn't a "gotcha" so much as a trap for the unwary: retention
 
 The quick-start `workflow-controller-configmap` ships with:
