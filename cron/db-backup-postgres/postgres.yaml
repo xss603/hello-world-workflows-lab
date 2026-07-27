@@ -17,6 +17,8 @@ kind: ConfigMap
 metadata:
   name: db-backup-postgres-initdb
 data:
+  # Also the table set workflows/export-csv-to-cos/workflow.yaml exports -
+  # both examples share this one Postgres instance.
   init.sql: |
     CREATE TABLE widgets (
       id SERIAL PRIMARY KEY,
@@ -24,6 +26,27 @@ data:
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     INSERT INTO widgets (name) VALUES ('sprocket'), ('gizmo'), ('doohickey');
+
+    CREATE TABLE customers (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL
+    );
+    INSERT INTO customers (name, email) VALUES
+      ('Ada Lovelace', 'ada@example.com'),
+      ('Grace Hopper', 'grace@example.com');
+
+    CREATE TABLE orders (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      widget_id INTEGER NOT NULL REFERENCES widgets(id),
+      quantity INTEGER NOT NULL DEFAULT 1,
+      ordered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    INSERT INTO orders (customer_id, widget_id, quantity) VALUES
+      (1, 1, 3),
+      (1, 2, 1),
+      (2, 3, 5);
 ---
 apiVersion: apps/v1
 kind: Deployment

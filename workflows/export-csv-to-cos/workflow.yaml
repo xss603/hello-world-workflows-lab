@@ -1,0 +1,166 @@
+# export-csv-to-cos: exports a defined list of Postgres tables as CSV and
+# uploads them to an S3-compatible bucket (IBM Cloud Object Storage in
+# production; this lab points `mc` at the in-cluster MinIO instead, since
+# mc's commands are byte-for-byte identical against either).
+#
+# Both steps get their credentials from Vault via the Agent Injector - no
+# credentials are ever written into this manifest or into a Kubernetes
+# Secret the workflow itself owns. See vault-setup.md for the one-time
+# Vault configuration (auth method, policies, roles, seeded secrets) this
+# depends on.
+#
+# The two steps share one Postgres-to-CSV-to-COS pipeline over a single
+# workflow-scoped PersistentVolumeClaim (`work`, declared in
+# spec.volumeClaimTemplates below) - `export-csv` writes CSVs to it,
+# `upload-cos` reads them back. Each step is still its own Pod; the PVC,
+# not a container filesystem, is what makes the data survive between them.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: export-csv-to-cos-
+  labels:
+    lab.example.com/concept: export-csv-to-cos
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  arguments:
+    parameters:
+      # A defined, static list of tables - space-separated so a POSIX `sh`
+      # `for` loop can consume it with no extra tooling (no bash, no jq).
+      - name: tables
+        value: "widgets customers orders"
+
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 256Mi
+
+  templates:
+    - name: main
+      steps:
+        - - name: export-csv
+            template: export-csv
+            arguments:
+              parameters:
+                - name: tables
+                  value: "{{workflow.parameters.tables}}"
+        - - name: upload-cos
+            template: upload-cos
+
+    - name: export-csv
+      serviceAccountName: export-csv-cos-pg-sa
+      metadata:
+        annotations:
+          vault.hashicorp.com/agent-inject: "true"
+          # Populate the secret file via an init container only, then exit -
+          # without this, the injector also adds a long-running sidecar that
+          # never terminates, and the pod hangs forever waiting for it.
+          vault.hashicorp.com/agent-pre-populate-only: "true"
+          vault.hashicorp.com/role: "export-csv-cos-pg"
+          vault.hashicorp.com/agent-inject-secret-db-creds.sh: "secret/data/db/postgres"
+          vault.hashicorp.com/agent-inject-template-db-creds.sh: |
+            {{- with secret "secret/data/db/postgres" -}}
+            export PGHOST="{{ .Data.data.host }}"
+            export PGPORT="{{ .Data.data.port }}"
+            export PGUSER="{{ .Data.data.username }}"
+            export PGPASSWORD="{{ .Data.data.password }}"
+            export PGDATABASE="{{ .Data.data.database }}"
+            {{- end -}}
+      inputs:
+        parameters:
+          - name: tables
+      script:
+        image: postgres:16-alpine
+        command: [sh]
+        source: |
+          set -eu
+          . /vault/secrets/db-creds.sh
+          mkdir -p /work/csv
+          for t in {{inputs.parameters.tables}}; do
+            case "$t" in
+              *[!a-zA-Z0-9_]*)
+                echo "refusing to export invalid table name: $t" >&2
+                exit 1
+                ;;
+            esac
+            echo "exporting table: $t"
+            psql -X -v ON_ERROR_STOP=1 \
+              -c "\copy (SELECT * FROM ${t}) TO STDOUT WITH CSV HEADER" \
+              > "/work/csv/${t}.csv"
+          done
+          echo "export complete:"
+          ls -la /work/csv
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+
+    - name: upload-cos
+      serviceAccountName: export-csv-cos-upload-sa
+      metadata:
+        annotations:
+          vault.hashicorp.com/agent-inject: "true"
+          vault.hashicorp.com/agent-pre-populate-only: "true"
+          vault.hashicorp.com/role: "export-csv-cos-upload"
+          vault.hashicorp.com/agent-inject-secret-cos-creds.sh: "secret/data/cos/ibm"
+          vault.hashicorp.com/agent-inject-template-cos-creds.sh: |
+            {{- with secret "secret/data/cos/ibm" -}}
+            export COS_ENDPOINT="{{ .Data.data.endpoint }}"
+            export COS_ACCESS_KEY="{{ .Data.data.access_key }}"
+            export COS_SECRET_KEY="{{ .Data.data.secret_key }}"
+            export COS_BUCKET="{{ .Data.data.bucket }}"
+            {{- end -}}
+      script:
+        image: minio/mc:latest
+        command: [sh]
+        env:
+          # mc defaults to $HOME/.mc, which isn't writable for an arbitrary
+          # non-root UID with no passwd entry - point it somewhere on the
+          # writable PVC instead of relying on $HOME being set at all.
+          - name: MC_CONFIG_DIR
+            value: /work/.mc
+        source: |
+          set -eu
+          . /vault/secrets/cos-creds.sh
+          mc alias set cos "$COS_ENDPOINT" "$COS_ACCESS_KEY" "$COS_SECRET_KEY"
+          # IBM COS buckets are normally pre-provisioned; --ignore-existing
+          # keeps this idempotent for the lab's throwaway bucket either way.
+          mc mb --ignore-existing "cos/$COS_BUCKET"
+          mc cp /work/csv/*.csv "cos/$COS_BUCKET/{{workflow.name}}/"
+          echo "uploaded objects:"
+          mc ls "cos/$COS_BUCKET/{{workflow.name}}/"
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

@@ -311,6 +311,128 @@ checking the artifact actually landed in MinIO
 (`kubectl -n argo exec deploy/minio -- ls /data/my-bucket/<run-name>/`)
 before suspending the schedule the same way as `hello-cron`.
 
+## Shared volumes between steps, and Vault-injected secrets ([`export-csv-to-cos`](../workflows/export-csv-to-cos/workflow.yaml))
+
+Every earlier example either used a single step, or passed data between
+steps as a parameter/artifact. This one needs an actual shared filesystem
+between two steps — Postgres tables get exported to CSV files in
+`export-csv`, then `upload-cos` reads those same files back to push them to
+an S3-compatible bucket with `mc`. It also swaps hardcoded/Secret-based
+credentials for Vault, injected via the [Vault Agent
+Injector](https://developer.hashicorp.com/vault/docs/platform/k8s/injector) —
+setup in [vault-setup.md](../workflows/export-csv-to-cos/vault-setup.md),
+verified against a real (dev-mode) Vault + injector installed via Helm into
+this lab's kind cluster, not just written up as theory.
+
+### Sharing a volume across steps means a PVC, not `emptyDir`
+
+Each step in a Steps/DAG template is its own Pod, scheduled independently -
+unlike a multi-container Pod (e.g. a `sidecar`), an `emptyDir` on one step's
+Pod is gone by the time the next step's Pod starts. The mechanism that
+actually persists a filesystem across steps is `spec.volumeClaimTemplates`
+at the *workflow* level:
+
+```yaml
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 256Mi
+```
+
+Argo provisions this PVC once per workflow run and **automatically makes a
+volume named `work` available to every template's Pod** - the only thing a
+template needs to do is mount it:
+
+```yaml
+volumeMounts:
+  - name: work
+    mountPath: /work
+```
+
+**Gotcha actually hit**: the first draft of this workflow also declared an
+explicit `volumes: [{name: work, persistentVolumeClaim: {claimName: work}}]`
+block in each template, on the assumption you always have to declare where a
+`volumeMounts` name comes from. That's correct for `configMap`/`secret`
+volumes, but wrong here — it points at a PVC literally named `work`, which
+never exists (the real one Argo creates is named `<workflow-name>-work`).
+The pod sat `Pending` with `persistentvolumeclaim "work" not found` until
+the redundant `volumes:` block was deleted from both templates; Argo's
+auto-injected volume (from `volumeClaimTemplates`) was already correct and
+just needed to be left alone.
+
+The PVC is automatically deleted once the workflow finishes — confirmed by
+checking `kubectl -n argo get pvc` immediately after a `Succeeded` run and
+finding it already gone, with no cleanup step of our own.
+
+### Vault Agent Injector: two things that aren't obvious from the annotations alone
+
+The injector works entirely off pod annotations — no Argo-specific
+integration exists or is needed, since Argo's executor doesn't care what a
+mutating webhook added to the Pod spec before it was scheduled:
+
+```yaml
+metadata:
+  annotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/agent-pre-populate-only: "true"
+    vault.hashicorp.com/role: "export-csv-cos-pg"
+    vault.hashicorp.com/agent-inject-secret-db-creds.sh: "secret/data/db/postgres"
+    vault.hashicorp.com/agent-inject-template-db-creds.sh: |
+      {{- with secret "secret/data/db/postgres" -}}
+      export PGHOST="{{ .Data.data.host }}"
+      ...
+      {{- end -}}
+```
+
+1. **`agent-pre-populate-only: "true"` is what makes this compatible with
+   Argo at all.** Without it, the injector adds its usual long-running
+   `vault-agent` *sidecar* container alongside `main` - and Argo's executor
+   waits for every container in the pod to exit before marking the step
+   done. A sidecar that's designed to run forever (to keep renewing/
+   re-rendering the secret) means the step Pod never completes. With this
+   annotation, the injector instead runs Vault Agent as an **init
+   container only** - it fetches the secret, renders the template to
+   `/vault/secrets/db-creds.sh`, and exits, exactly like any other init
+   container. This is the standard fix for one-shot workloads (Argo steps,
+   Kubernetes `Job`s, CI runners) — anything that isn't a long-lived
+   Deployment.
+2. **The `{{ }}` in the Vault template annotation didn't collide with
+   Argo's own `{{ }}` variable substitution, but it was worth verifying
+   rather than assuming.** Argo uses the same delimiter for its own
+   variables (`{{workflow.name}}`, `{{inputs.parameters.x}}`); the concern
+   going in was that Argo might try to resolve `{{ .Data.data.host }}` as
+   an (unresolvable) Argo variable and fail lint or submission. It didn't -
+   `argo lint --offline` passed and the workflow ran cleanly with the
+   annotation inlined exactly as shown above, because Argo only substitutes
+   recognized variable prefixes and leaves anything else untouched. See
+   vault-setup.md for the fallback (`vault.hashicorp.com/agent-configmap`)
+   if a different Argo version ever behaves differently here.
+
+Sourcing the rendered file at the top of each step's script
+(`. /vault/secrets/db-creds.sh`) is what actually gets the credentials into
+the shell's environment — the injector's job ends at "write a file inside
+the pod," reading it is on the workload like any other init-container output.
+
+### Least privilege, enforced by *which ServiceAccount ran the pod*
+
+`export-csv` and `upload-cos` each run under their own ServiceAccount
+(`export-csv-cos-pg-sa`, `export-csv-cos-upload-sa`), each bound to a
+different Vault Kubernetes-auth role, each of which maps to a policy that
+can read exactly one secret path. The `upload-cos` step's pod is
+*structurally incapable* of reading the Postgres credentials — it has no
+Vault role that grants it — the same principle as the Resource templates
+section above (`hello-resource`) scoping Kubernetes RBAC per-workflow, just
+enforced by Vault instead of the Kubernetes API server. And, same lesson as
+`hello-resource`: both of these
+custom ServiceAccounts still needed the `executor` Role bound via
+`rbac.yaml`, or the pods fail on `workflowtaskresults.argoproj.io is
+forbidden` regardless of whether Vault injection itself works correctly.
+
 ## One more thing that isn't a "gotcha" so much as a trap for the unwary: retention
 
 The quick-start `workflow-controller-configmap` ships with:

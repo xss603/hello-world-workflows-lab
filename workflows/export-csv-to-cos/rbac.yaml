@@ -1,0 +1,44 @@
+# Two least-privilege ServiceAccounts, one per step, each bound to a Vault
+# Kubernetes-auth role that only grants read on the one secret path that
+# step needs (see vault-setup.md). Both also need the quick-start install's
+# built-in `executor` Role - same reason as workflows/hello-resource/rbac.yaml:
+# every pod's executor reports its result via the WorkflowTaskResult CRD
+# regardless of what the main container does, and a custom ServiceAccount
+# has no permissions for that until you bind it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: export-csv-cos-pg-sa
+  labels:
+    lab.example.com/concept: export-csv-to-cos
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: export-csv-cos-upload-sa
+  labels:
+    lab.example.com/concept: export-csv-to-cos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: export-csv-cos-pg-executor
+subjects:
+  - kind: ServiceAccount
+    name: export-csv-cos-pg-sa
+roleRef:
+  kind: Role
+  name: executor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: export-csv-cos-upload-executor
+subjects:
+  - kind: ServiceAccount
+    name: export-csv-cos-upload-sa
+roleRef:
+  kind: Role
+  name: executor
+  apiGroup: rbac.authorization.k8s.io
