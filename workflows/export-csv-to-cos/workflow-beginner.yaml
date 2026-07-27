@@ -1,0 +1,181 @@
+# export-csv-to-cos (beginner version): same result as workflow.yaml - a
+# defined list of named SELECT queries exported to CSV and uploaded to an
+# S3-compatible bucket - but the "run N queries from one parameter" part is
+# done Argo's way instead of hand-rolled in shell.
+#
+# workflow.yaml packs all the queries into one JSON parameter, then has a
+# single pod unpack that JSON (via Postgres's own jsonb functions, since
+# installing `jq` needs root) and run every \copy through one psql session
+# to save connections. That's a real optimization, but it's a lot to read
+# for a first pass. This version instead uses `withItems` - already
+# introduced in workflows/hello-loops - to let Argo itself fan the query
+# list out into one pod per query. Each pod's script becomes about as
+# simple as it can get: source the credentials, run one query, write one
+# file. The trade-off: N queries means N Postgres connections and N pods
+# instead of 2 - fine for a handful of reports, worth revisiting
+# workflow.yaml's approach if that list grows into the dozens.
+#
+# Prerequisites are identical to workflow.yaml: the `postgres`
+# Deployment/Service from ../../cron/db-backup-postgres/postgres.yaml, and
+# the Vault setup in vault-setup.md. Same rbac.yaml, same Vault roles/
+# policies/secrets - nothing about credentials or RBAC changes here, only
+# how the query list is consumed.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: export-csv-to-cos-beginner-
+  labels:
+    lab.example.com/concept: export-csv-to-cos-beginner
+spec:
+  entrypoint: main
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 256Mi
+
+  templates:
+    - name: main
+      steps:
+        # withItems here means: run the `export-one-query` template once
+        # per entry below, in parallel, one pod each. `{{item.name}}` and
+        # `{{item.sql}}` are just that entry's two fields - the same
+        # {{ }} substitution already used for {{workflow.name}} elsewhere,
+        # nothing new to learn.
+        - - name: export-csv
+            template: export-one-query
+            arguments:
+              parameters:
+                - name: name
+                  value: "{{item.name}}"
+                - name: sql
+                  value: "{{item.sql}}"
+            withItems:
+              - { name: widgets_all, sql: "SELECT * FROM widgets ORDER BY id" }
+              - { name: orders_last_7_days, sql: "SELECT * FROM orders WHERE ordered_at > now() - interval '7 days' ORDER BY ordered_at DESC" }
+              - { name: customer_order_totals, sql: "SELECT c.name AS customer, SUM(o.quantity) AS total_quantity FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.name ORDER BY total_quantity DESC" }
+              - { name: widget_popularity, sql: "SELECT w.name AS widget, COUNT(*) AS times_ordered, SUM(o.quantity) AS total_units FROM orders o JOIN widgets w ON w.id = o.widget_id GROUP BY w.name ORDER BY total_units DESC" }
+        - - name: upload-cos
+            template: upload-cos
+
+    - name: export-one-query
+      serviceAccountName: export-csv-cos-pg-sa
+      metadata:
+        annotations:
+          vault.hashicorp.com/agent-inject: "true"
+          # Populate the secret file via an init container only, then exit -
+          # without this, the injector also adds a long-running sidecar that
+          # never terminates, and the pod hangs forever waiting for it.
+          vault.hashicorp.com/agent-pre-populate-only: "true"
+          vault.hashicorp.com/role: "export-csv-cos-pg"
+          vault.hashicorp.com/agent-inject-secret-db-creds.sh: "secret/data/db/postgres"
+          vault.hashicorp.com/agent-inject-template-db-creds.sh: |
+            {{- with secret "secret/data/db/postgres" -}}
+            export PGHOST="{{ .Data.data.host }}"
+            export PGPORT="{{ .Data.data.port }}"
+            export PGUSER="{{ .Data.data.username }}"
+            export PGPASSWORD="{{ .Data.data.password }}"
+            export PGDATABASE="{{ .Data.data.database }}"
+            {{- end -}}
+      inputs:
+        parameters:
+          - name: name
+          - name: sql
+      script:
+        image: postgres:16-alpine
+        command: [sh]
+        env:
+          # Same reason as workflow.yaml: pass these as env vars, not
+          # inline `{{inputs.parameters.sql}}` in the script text below -
+          # Kubernetes hands env values to the container as plain data, so
+          # nothing in `sql` (quotes, `$`, whatever a query might contain)
+          # gets a second, unwanted pass through the shell as syntax.
+          - name: NAME
+            value: "{{inputs.parameters.name}}"
+          - name: SQL
+            value: "{{inputs.parameters.sql}}"
+        source: |
+          set -eu
+          . /vault/secrets/db-creds.sh
+          mkdir -p /work/csv
+
+          echo "exporting '$NAME'"
+          echo "  query: $SQL"
+          psql -X -v ON_ERROR_STOP=1 \
+            -c "\copy (${SQL}) TO '/work/csv/${NAME}.csv' WITH CSV HEADER"
+          echo "wrote /work/csv/${NAME}.csv"
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+
+    - name: upload-cos
+      serviceAccountName: export-csv-cos-upload-sa
+      metadata:
+        annotations:
+          vault.hashicorp.com/agent-inject: "true"
+          vault.hashicorp.com/agent-pre-populate-only: "true"
+          vault.hashicorp.com/role: "export-csv-cos-upload"
+          vault.hashicorp.com/agent-inject-secret-cos-creds.sh: "secret/data/cos/ibm"
+          vault.hashicorp.com/agent-inject-template-cos-creds.sh: |
+            {{- with secret "secret/data/cos/ibm" -}}
+            export COS_ENDPOINT="{{ .Data.data.endpoint }}"
+            export COS_ACCESS_KEY="{{ .Data.data.access_key }}"
+            export COS_SECRET_KEY="{{ .Data.data.secret_key }}"
+            export COS_BUCKET="{{ .Data.data.bucket }}"
+            {{- end -}}
+      script:
+        image: minio/mc:latest
+        command: [sh]
+        env:
+          # mc defaults to $HOME/.mc, which isn't writable for an arbitrary
+          # non-root UID with no passwd entry - point it somewhere on the
+          # writable PVC instead of relying on $HOME being set at all.
+          - name: MC_CONFIG_DIR
+            value: /work/.mc
+        source: |
+          set -eu
+          . /vault/secrets/cos-creds.sh
+          mc alias set cos "$COS_ENDPOINT" "$COS_ACCESS_KEY" "$COS_SECRET_KEY"
+          # IBM COS buckets are normally pre-provisioned; --ignore-existing
+          # keeps this idempotent for the lab's throwaway bucket either way.
+          mc mb --ignore-existing "cos/$COS_BUCKET"
+          mc cp /work/csv/*.csv "cos/$COS_BUCKET/{{workflow.name}}/"
+          echo "uploaded objects:"
+          mc ls "cos/$COS_BUCKET/{{workflow.name}}/"
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

@@ -520,6 +520,68 @@ reach for either of these patterns elsewhere:
    If a `:'var'`-style reference silently fails to resolve elsewhere, check
    whether it's inside a `-c` argument first.
 
+### The same workflow, the simple way ([`workflow-beginner.yaml`](../workflows/export-csv-to-cos/workflow-beginner.yaml))
+
+Everything above — `jsonb_array_elements`, `:'var'` bind-quoting, building a
+generated `.sql` script by hand, `-At -F "$TAB"` — is real, but it's a lot to
+read the first time you meet a Steps template. None of it is actually
+required to run a defined list of named queries; it's what you reach for
+once you specifically want one JSON parameter and one shared connection.
+`workflow-beginner.yaml` does the exact same thing with a technique this lab
+already introduced in [`hello-loops`](../workflows/hello-loops/workflow.yaml)
+— `withItems` — and skips the JSON parsing entirely:
+
+```yaml
+- - name: export-csv
+    template: export-one-query
+    arguments:
+      parameters:
+        - name: name
+          value: "{{item.name}}"
+        - name: sql
+          value: "{{item.sql}}"
+    withItems:
+      - { name: widgets_all, sql: "SELECT * FROM widgets ORDER BY id" }
+      - { name: orders_last_7_days, sql: "SELECT * FROM orders WHERE ..." }
+      # ...
+```
+
+Argo fans this out into one pod per list entry, each running
+`export-one-query` with `{{item.name}}`/`{{item.sql}}` already substituted -
+the same `{{ }}` mechanism as `{{workflow.name}}`, nothing new. Each pod's
+script is about as short as this workflow's per-query work can get:
+
+```sh
+set -eu
+. /vault/secrets/db-creds.sh
+mkdir -p /work/csv
+psql -X -v ON_ERROR_STOP=1 -c "\copy (${SQL}) TO '/work/csv/${NAME}.csv' WITH CSV HEADER"
+```
+
+No TSV, no `jsonb_array_elements`, no generated script file - source
+credentials, run one query, write one file.
+
+The trade-off is real, not hidden: N queries now means N pods and N Postgres
+connections (back to what `workflow.yaml` specifically moved away from),
+and the query list is inlined in the YAML rather than a single overridable
+`{{workflow.parameters.queries}}` string. It's a legitimate choice for a
+handful of reports, and it reuses a concept you've already seen instead of
+introducing three new ones at once.
+
+The one thing worth verifying rather than assuming going in: four sibling
+pods all mount the *same* `work` PVC concurrently here (`ReadWriteOnce`,
+not `ReadWriteMany`), since `withItems` runs them in parallel. RWO
+technically means "single node," and it was genuinely unclear whether kind's
+default `local-path-provisioner` (effectively `hostPath` under the hood)
+would allow more than one pod to hold it open at once even on a single-node
+cluster. It does — confirmed by actually submitting the workflow, not by
+assuming a hostPath-backed volume would obviously behave that way: all four
+`export-one-query` pods completed successfully in parallel, and the
+uploaded CSVs matched `workflow.yaml`'s output byte-for-byte. Don't assume
+this holds on a multi-node cluster or a different storage backend, though —
+concurrent RWO access across pods is provisioner-specific behavior, not a
+Kubernetes guarantee.
+
 ## One more thing that isn't a "gotcha" so much as a trap for the unwary: retention
 
 The quick-start `workflow-controller-configmap` ships with:
