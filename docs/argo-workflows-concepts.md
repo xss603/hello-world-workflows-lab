@@ -635,6 +635,74 @@ Two things that mattered in practice, not just in theory:
   a dedicated admin identity instead of sharing one with an application
   that holds its own long-lived credential elsewhere.
 
+## Manual OpenTelemetry instrumentation ([`hello-otel`](../workflows/hello-otel/workflow.yaml))
+
+Argo has no built-in distributed tracing across a workflow's steps - each
+step is an independent Pod with no automatic correlation between them. This
+example builds a real 3-span trace by hand: `hello-otel-workflow` (root) →
+`start` → `work`, sent as raw OTLP/HTTP JSON via Python's stdlib `urllib`
+(no OTel SDK - same reasoning as avoiding `jq` in `export-csv-to-cos`: a
+pip install at runtime hits the same non-root/no-package-manager wall) to
+a real collector (SigNoz - install/setup gotchas in
+[signoz-setup.md](../workflows/hello-otel/signoz-setup.md)). Confirmed by
+actually opening the SigNoz UI and looking at the resulting trace, not just
+by checking the workflow reached `Succeeded` - a `200` from the collector
+only proves the collector *accepted* the span, not that a coherent trace
+came out the other end.
+
+### `onExit` can't see a custom `{{workflow.outputs.parameters.x}}` - only Argo's own built-ins
+
+The root span's whole point is representing the workflow's total duration,
+which by definition isn't known until the workflow finishes - so it has to
+be closed by the `onExit` handler (see `hello-exit-handler`), the one
+template guaranteed to run last. The first draft generated the trace ID and
+root span ID in the `start` step, bubbled them up as the entrypoint
+template's `outputs.parameters` (the same mechanism `hello-steps` uses to
+pass a value between two steps), and referenced
+`{{workflow.outputs.parameters.trace_id}}` inside `onExit`. That looks like
+it should work - it's the documented way to expose a value at the
+workflow level - and it isn't accepted:
+
+```
+Error: failed to submit workflow: rpc error: code = InvalidArgument desc =
+templates.finish: failed to resolve {{workflow.outputs.parameters.trace_id}}
+```
+
+Confirmed directly (both `argo lint --offline` and a real submission reject
+it identically), not inferred from documentation. The actual rule: Argo
+resolves a specific, short allowlist of built-in variables inside `onExit`
+- `{{workflow.status}}`, `{{workflow.name}}`, `{{workflow.uid}}`,
+`{{workflow.creationTimestamp}}`, and a few others - but *not* arbitrary
+custom parameters from the entrypoint template's own `outputs`, even though
+nothing in the docs calls out that distinction explicitly.
+
+The fix ended up more elegant than the original design: `{{workflow.uid}}`
+is a real Kubernetes UID - a UUID - and a UUID with its dashes stripped is
+exactly 32 hex characters, which is precisely an OTLP trace ID's format.
+Every template (`start`, `work`, `finish`) computes `trace_id =
+workflow.uid.replace("-", "")` independently, from the same built-in
+variable, rather than one step computing it and passing it to the others.
+Nothing custom crosses the `onExit` boundary at all - `root_span_id` is
+just `trace_id[:16]`, equally independently computable everywhere, and
+`{{workflow.creationTimestamp}}` (also a built-in, so also valid inside
+`onExit`) gives the root span its start time. The only thing that still
+gets passed as a normal step output is `start_span_id` (`start`'s own span
+ID, which `work` needs as its parent) - and that crossing stays entirely
+inside the regular entrypoint template, never touching `onExit`, so it was
+never actually broken.
+
+### A fresh SigNoz install silently drops everything you send it until you complete sign-up
+
+Worth calling out here too, briefly (full diagnosis in
+[signoz-setup.md](../workflows/hello-otel/signoz-setup.md)): the first
+submission failed with a plain `ConnectionRefusedError`, and the actual
+cause - the collector's OTLP receivers don't fully bind until SigNoz's
+backend has at least one organization, which only gets created by
+completing the first-run sign-up page - took checking the collector's
+listening sockets, then its logs, then the backend's logs to actually find.
+Not a workflow bug at all; the workflow was correctly instrumented the
+whole time.
+
 ## One more thing that isn't a "gotcha" so much as a trap for the unwary: retention
 
 The quick-start `workflow-controller-configmap` ships with:

@@ -23,9 +23,11 @@ hello-world-workflows-lab/
 - [kind](https://kind.sigs.k8s.io/)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Argo Workflows CLI](https://github.com/argoproj/argo-workflows/releases) (`argo`)
-- [Helm](https://helm.sh/) — only needed for `workflows/export-csv-to-cos`, to
+- [Helm](https://helm.sh/) — needed for `workflows/export-csv-to-cos` (to
   install Vault + the Agent Injector; see
-  [vault-setup.md](workflows/export-csv-to-cos/vault-setup.md)
+  [vault-setup.md](workflows/export-csv-to-cos/vault-setup.md)) and for
+  `workflows/hello-otel` (to install SigNoz; see
+  [signoz-setup.md](workflows/hello-otel/signoz-setup.md))
 
 ```bash
 kind create cluster --name argo-lab
@@ -64,6 +66,7 @@ pointed at the `argo` namespace.
 | [`workflows/hello-artifacts`](workflows/hello-artifacts/workflow.yaml) | Output/input artifacts via the MinIO artifact repository | `argo submit --watch workflows/hello-artifacts/workflow.yaml` |
 | [`workflows/hello-exit-handler`](workflows/hello-exit-handler/workflow.yaml) | `onExit` handler, runs regardless of success/failure | `argo submit --watch workflows/hello-exit-handler/workflow.yaml` |
 | [`workflows/hello-resource`](workflows/hello-resource/workflow.yaml) | `resource` template creating/patching a ConfigMap directly | `kubectl apply -f workflows/hello-resource/rbac.yaml && argo submit --watch workflows/hello-resource/workflow.yaml` |
+| [`workflows/hello-otel`](workflows/hello-otel/workflow.yaml) | Manual OpenTelemetry instrumentation: raw OTLP/HTTP spans (no SDK) sent to a real collector (SigNoz), a 3-level parent-child trace (`hello-otel-workflow` → `start` → `work`), root span closed by `onExit` — see [signoz-setup.md](workflows/hello-otel/signoz-setup.md) | `argo submit --watch workflows/hello-otel/workflow.yaml` (requires SigNoz installed first, see signoz-setup.md) |
 | [`templates/workflow-template`](templates/workflow-template/template.yaml) | Reusable `WorkflowTemplate` invoked via `templateRef` | `kubectl apply -f templates/workflow-template/template.yaml && argo submit --watch templates/workflow-template/consumer-workflow.yaml` |
 | [`templates/cluster-workflow-template`](templates/cluster-workflow-template/template.yaml) | Cluster-scoped `ClusterWorkflowTemplate` (see its [README](templates/cluster-workflow-template/README.md) for when to pick this over a `WorkflowTemplate`) | `kubectl apply -f templates/cluster-workflow-template/template.yaml && argo submit --watch templates/cluster-workflow-template/consumer-workflow.yaml` |
 | [`cron/hello-cron`](cron/hello-cron/cronworkflow.yaml) | `CronWorkflow` on a schedule, reusing the `greeter` `WorkflowTemplate` | `kubectl apply -f templates/workflow-template/template.yaml && kubectl apply -f cron/hello-cron/cronworkflow.yaml` (then `argo cron list` / wait for the schedule, or `argo submit --from cronworkflow/hello-cron --watch` to trigger one run immediately) |

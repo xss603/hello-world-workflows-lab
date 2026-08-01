@@ -1,0 +1,292 @@
+# hello-otel: manually instruments a workflow with OpenTelemetry traces,
+# sent as raw OTLP/HTTP JSON to a collector (SigNoz, in this lab) - no
+# OTel SDK, just Python's stdlib `urllib`, since Argo has no built-in
+# distributed tracing across steps and installing a real SDK would need a
+# pip install at runtime (same non-root/no-apk problem this lab already
+# hit and worked around in export-csv-to-cos).
+#
+# The trace has 3 spans in a real parent-child hierarchy:
+#   hello-otel-workflow (root, closed by the onExit handler - see below)
+#     └─ start                (the `start` step's own span)
+#          └─ work             (the `work` step's own span, child of `start`)
+#
+# The interesting problem this solves: the *root* span represents the
+# whole workflow's duration, but nothing knows that duration until the
+# workflow actually finishes - by definition, no regular step can close
+# it. onExit (see workflows/hello-exit-handler) is exactly the right tool:
+# it always runs last, so it's the only template that can legitimately
+# emit the root span's end time.
+#
+# Getting the trace/root-span IDs into onExit turned out to need a
+# different mechanism than expected: {{workflow.outputs.parameters.x}}
+# (a custom parameter bubbled up from the `start` step) looks like it
+# should work, but the argo-server rejects the submission outright -
+# "failed to resolve {{workflow.outputs.parameters.trace_id}}". Confirmed
+# directly, not assumed: even `argo lint --offline` catches it before
+# a submission would. Custom workflow-level output parameters aren't on
+# the (short) list of variables Argo resolves inside onExit - only
+# built-ins like {{workflow.status}} are (see hello-exit-handler). The
+# fix: don't pass anything custom across that boundary at all.
+# {{workflow.uid}} is a real Kubernetes UID - a UUID, which with its
+# dashes stripped is exactly 32 hex characters: a valid OTLP trace ID,
+# for free, identical and independently computable in every template
+# including onExit. root_span_id is just its first 16 hex characters.
+# {{workflow.creationTimestamp}} (also a built-in) gives onExit a
+# start-of-workflow timestamp to close the root span's duration against.
+#
+# Requires SigNoz installed via Helm (see the repo README) - specifically
+# its otel-collector Service reachable at
+# signoz-otel-collector.signoz.svc.cluster.local:4318 (OTLP/HTTP).
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-otel-
+  labels:
+    lab.example.com/concept: opentelemetry
+spec:
+  entrypoint: main
+  onExit: finish
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  templates:
+    - name: main
+      steps:
+        - - name: start
+            template: start
+        - - name: work
+            template: work
+            arguments:
+              parameters:
+                - name: parent_span_id
+                  value: "{{steps.start.outputs.parameters.start_span_id}}"
+
+    - name: start
+      script:
+        image: python:3.12-alpine
+        command: [python]
+        env:
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+        source: |
+          import os, time, json, urllib.request
+
+          def send_span(trace_id, span_id, parent_span_id, name, start_ns, end_ns, status_code=1):
+              span = {
+                  "traceId": trace_id,
+                  "spanId": span_id,
+                  "name": name,
+                  "kind": 1,
+                  "startTimeUnixNano": str(start_ns),
+                  "endTimeUnixNano": str(end_ns),
+                  "status": {"code": status_code},
+              }
+              if parent_span_id:
+                  span["parentSpanId"] = parent_span_id
+              payload = {
+                  "resourceSpans": [{
+                      "resource": {"attributes": [
+                          {"key": "service.name", "value": {"stringValue": "hello-otel"}},
+                      ]},
+                      "scopeSpans": [{
+                          "scope": {"name": "hello-otel-workflow"},
+                          "spans": [span],
+                      }],
+                  }],
+              }
+              req = urllib.request.Request(
+                  "http://signoz-otel-collector.signoz.svc.cluster.local:4318/v1/traces",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  print(f"sent span '{name}' ({span_id}): HTTP {resp.status}")
+
+          # trace_id and root_span_id are derived from {{workflow.uid}},
+          # not generated here - every template computes the same values
+          # independently, so nothing has to be threaded through onExit.
+          trace_id = os.environ["WORKFLOW_UID"].replace("-", "")
+          root_span_id = trace_id[:16]
+          # start_span_id IS this span's own identity - has to be random,
+          # no formula makes sense for it - and gets passed to `work` the
+          # ordinary way (a normal step output), since that crossing stays
+          # inside the main template, not into onExit.
+          start_span_id = os.urandom(8).hex()
+
+          span_start_ns = time.time_ns()
+          print("doing setup work...")
+          time.sleep(0.5)
+          span_end_ns = time.time_ns()
+          send_span(trace_id, start_span_id, root_span_id, "start", span_start_ns, span_end_ns)
+
+          with open("/tmp/start_span_id", "w") as f:
+              f.write(start_span_id)
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+      outputs:
+        parameters:
+          - name: start_span_id
+            valueFrom:
+              path: /tmp/start_span_id
+
+    - name: work
+      inputs:
+        parameters:
+          - name: parent_span_id
+      script:
+        image: python:3.12-alpine
+        command: [python]
+        env:
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+          - name: PARENT_SPAN_ID
+            value: "{{inputs.parameters.parent_span_id}}"
+        source: |
+          import os, time, json, urllib.request
+
+          def send_span(trace_id, span_id, parent_span_id, name, start_ns, end_ns, status_code=1):
+              span = {
+                  "traceId": trace_id,
+                  "spanId": span_id,
+                  "name": name,
+                  "kind": 1,
+                  "startTimeUnixNano": str(start_ns),
+                  "endTimeUnixNano": str(end_ns),
+                  "status": {"code": status_code},
+              }
+              if parent_span_id:
+                  span["parentSpanId"] = parent_span_id
+              payload = {
+                  "resourceSpans": [{
+                      "resource": {"attributes": [
+                          {"key": "service.name", "value": {"stringValue": "hello-otel"}},
+                      ]},
+                      "scopeSpans": [{
+                          "scope": {"name": "hello-otel-workflow"},
+                          "spans": [span],
+                      }],
+                  }],
+              }
+              req = urllib.request.Request(
+                  "http://signoz-otel-collector.signoz.svc.cluster.local:4318/v1/traces",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  print(f"sent span '{name}' ({span_id}): HTTP {resp.status}")
+
+          trace_id = os.environ["WORKFLOW_UID"].replace("-", "")
+          parent_span_id = os.environ["PARENT_SPAN_ID"]
+          span_id = os.urandom(8).hex()
+
+          start_ns = time.time_ns()
+          print("doing the actual work...")
+          time.sleep(1.5)
+          end_ns = time.time_ns()
+          send_span(trace_id, span_id, parent_span_id, "work", start_ns, end_ns)
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+    - name: finish
+      script:
+        image: python:3.12-alpine
+        command: [python]
+        env:
+          - name: WORKFLOW_UID
+            value: "{{workflow.uid}}"
+          - name: WORKFLOW_CREATION_TIMESTAMP
+            value: "{{workflow.creationTimestamp}}"
+          - name: WORKFLOW_STATUS
+            value: "{{workflow.status}}"
+        source: |
+          import os, time, json, urllib.request
+          from datetime import datetime
+
+          def send_span(trace_id, span_id, parent_span_id, name, start_ns, end_ns, status_code=1):
+              span = {
+                  "traceId": trace_id,
+                  "spanId": span_id,
+                  "name": name,
+                  "kind": 1,
+                  "startTimeUnixNano": str(start_ns),
+                  "endTimeUnixNano": str(end_ns),
+                  "status": {"code": status_code},
+              }
+              if parent_span_id:
+                  span["parentSpanId"] = parent_span_id
+              payload = {
+                  "resourceSpans": [{
+                      "resource": {"attributes": [
+                          {"key": "service.name", "value": {"stringValue": "hello-otel"}},
+                      ]},
+                      "scopeSpans": [{
+                          "scope": {"name": "hello-otel-workflow"},
+                          "spans": [span],
+                      }],
+                  }],
+              }
+              req = urllib.request.Request(
+                  "http://signoz-otel-collector.signoz.svc.cluster.local:4318/v1/traces",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  print(f"sent span '{name}' ({span_id}): HTTP {resp.status}")
+
+          trace_id = os.environ["WORKFLOW_UID"].replace("-", "")
+          root_span_id = trace_id[:16]
+          status = os.environ["WORKFLOW_STATUS"]
+
+          # {{workflow.creationTimestamp}} is RFC3339 ("...Z" suffix) -
+          # only second-level precision, unlike the child spans' real
+          # time.time_ns() timestamps, but that's fine for the root span:
+          # a few seconds of workflow overhead doesn't need nanosecond
+          # accuracy to be a useful duration in the trace waterfall.
+          created = os.environ["WORKFLOW_CREATION_TIMESTAMP"].replace("Z", "+00:00")
+          start_ns = int(datetime.fromisoformat(created).timestamp() * 1_000_000_000)
+          end_ns = time.time_ns()
+
+          # OTLP status codes: 0 UNSET, 1 OK, 2 ERROR - reflect the
+          # workflow's real outcome in the root span, not a fixed value.
+          status_code = 1 if status == "Succeeded" else 2
+          send_span(trace_id, root_span_id, None, "hello-otel-workflow", start_ns, end_ns, status_code=status_code)
+          print(f"closed root span for trace {trace_id} (workflow status: {status})")
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
